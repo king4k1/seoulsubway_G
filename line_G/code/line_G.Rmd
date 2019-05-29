@@ -1,0 +1,1629 @@
+---
+title: "Demand forecasts of Gangbuk line using subway users getting on and off data"
+author: |
+  | KwangMin Son
+  | Department of Statistics, SKKU
+date: \today
+output: pdf_document
+fontsize: 10pt
+incremental: true
+header-includes:
+   - \usepackage{kotex}
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r global_options, R.options=knitr::opts_chunk$set(echo=FALSE, warning=FALSE, message=FALSE)}
+```
+
+```{r}
+## load packages
+#devtools::install_github("king4k1/seoulsubway")
+#install.packages("geosphere")
+library(geosphere)
+library(nkmap)
+library(knitr)
+#install.packages("maptools")
+library(maptools)
+library(rgdal)
+#install.packages("rgeos")
+#install.packages("raster")
+library(rgeos)
+library(raster)
+library(data.table)
+library(randomForest)
+library(glmnet)
+#install.packages("glmnet")
+library(seoulsubway)
+library(rpart)
+set.seed(2018710174)
+#setwd("C:/Users/82104/Desktop/seoulsubway_G/line_G/code")
+
+pdf.options(family = "Korea1deb")
+data(subway_data_DT)
+```
+
+## 1. 강북횡단선이란 ? 
+
+2019년 2월 20일 발표된 2차 서울특별시 도시철도망 구축계획에서 발표한 지역 균형발전과 철도 교통 소외지역 해소 목적으로 포함된 신규 경전철 노선이다. 이는 노선 선정 당시 지역균형발전 측면에서 가장 높은 점수를 기록하였으며 과거 추진되었으나 폐기된 '홍제-길음선'을 일부 구간 계승한다.
+
+```{r out.width="70%", out.height="70%", fig.align='center', fig.width=4, fig.height=5}
+include_graphics(path=c("../figure/line.png"))
+```
+
+### 1.1 분석목적
+
+강북횡단선이 개통된다면 지하철 최단경로가 달라질 것이다. 따라서 사람들의 이동경로는 달라질 것이다. 이를 통한 이동경로로써의 강북횡단선의 수요와 역 주위정보를 통한 역별 승/하차값을 예측하여 강북횡단선 지하철 운영계획 수립 시 도움이 된다. 지하철은 다양한 시간대에 다양한 사람들이 이용하는 대중교통이기에 운영비 관점에서 보았을 때, 차량의 탄력적인 운영을 통한 수송효율성을 높이는 것이 중요하기 때문이다.
+
+
+### 1.2 시뮬레이션을 위한 강북횡단선 노선 정의
+
+2019년 2월 20일 발표한 `서울특별시 도시철도망 구축계획`을 통해 목동~청량리를 잇는 강북횡단선 등 6개 노선 신설에 대한 계획이 공개되었다. 본 논문에서는 강북횡단선에 대하여 고려할 것이다. 우선 강북횡단선을 기존 구축한 지하철 네트워크에 추가하는 과정이 필요하다.
+
+```{r, eval=FALSE}
+Code <- paste0("G", 101:119)
+ExCode <- paste0("G", 101:119)
+Name <- c("청량리", "홍릉", "월곡", "종암사거리", "길음", "정릉", "국민대",
+          "평창동", "상명대입구", "홍제", "서대문구청", "명지대",
+          "남가좌", "디지털미디어시티", "상암", "등촌", "신등촌",
+          "목동사거리", "목동")
+long <- rep(NA, 19)
+lat <- rep(NA, 19)
+Line <- rep('G', 19)
+
+address <- c('서울특별시 전농1동 청량리역',
+             '서울특별시 동대문구 청량리동 회기로 57',
+             '서울특별시 월곡2동', '서울특별시 성북구 종암동 3-1288',
+             '서울특별시 성북구 길음1동 877-66', 
+             '서울특별시 정릉1동', '서울특별시 성북구 정릉동 정릉로 77',
+             '서울특별시 종로구 평창동 127', '서울특별시 종로구 홍지동 72-11',
+             '서울특별시 서대문구 홍제동 305-5', '서울특별시 서대문구 연희동 연희로 248',
+             '서울특별시 서대문구 남가좌2동 355-7',
+             '서울특별시 서대문구 남가좌2동', '디지털미디어시티역',
+             '서울특별시 마포구 성산2동 513-4', '서울특별시 강서구 등촌1동',
+             '서울특별시 양천구 목동 713-8', 
+             '서울특별시 강서구 화곡4동 939-2',
+             '서울특별시 목1동 목동역')
+
+Transfer <- c("1|B|K", 0, "6",  0, "4", "UI", 0, 0, 0,
+              "3", 0, 0, 0, "6|A|K", 0, 9, 0, 0, 5)
+
+for(i in (i+1):19){
+result <- geocode_kakao(address[i],  kakao_key = "bd0f02bafa236ced3eebb2d12845a306")
+long[i] <- result$lon
+lat[i] <- result$lat
+}
+
+line_G <- data.table::data.table(Code, Name, Line, ExCode, CyCode, X, Y, lat, long, Transfer)
+
+line_G[1,c('lat', 'long')] <-  
+  subway_data_G_DT[which(subway_data_G_DT=="청량리")[1],c('lat', 'long')]
+line_G[14,c('lat', 'long')] <-  
+  subway_data_G_DT[which(subway_data_G_DT=="디지털미디어시티")[1],c('lat', 'long')]
+line_G[19,c('lat', 'long')] <- subway_data_G_DT[which(subway_data_G_DT=="목동"),c('lat', 'long')]
+
+line_G[8,c('lat', 'long')] <- geocode_kakao('서울시 종로구 평창동 평창길',  kakao_key = "bd0f02bafa236ced3eebb2d12845a306")
+line_G$lat <- round(as.numeric(line_G$lat), 7)
+line_G$long <- round(as.numeric(line_G$long), 7)
+line_G[12,c('lat', 'long')] <- data.table::data.table(37.576357, 126.926395)
+line_G[13,c('lat', 'long')] <- data.table::data.table(37.571830, 126.921170)
+## 시간, 거리 계산
+line_G$Dist <- NA
+line_G$Time <- NA
+
+for(i in 1:18){
+  line_G$Dist[(i+1)] <- 
+    distHaversine(line_G[i,c('long','lat')]%>%t() %>%as.numeric(),
+                  line_G[i+1,c('long','lat')]%>%t() %>%as.numeric())
+  line_G$Time[(i+1)] <- line_G$Dist[(i+1)]/566
+}
+
+
+line_G$Dist[1] <- line_G$Time[1] <- 0
+line_G$Transfer <- Transfer
+
+#save(file="line_G/line_G.RData", line_G)
+```
+
+```{r, eval=FALSE}
+## 환승역 수정한 데이터셋 정의  
+
+data("subway_data")
+subway_data_G <- subway_data
+subway_data_G[["G"]] <- line_G
+
+# 1.
+subway_data_G[["1"]][which(subway_data_G[["1"]]$Name=="청량리"),"Transfer"] <- "B|K|G"
+subway_data_G[["B"]][which(subway_data_G[["B"]]$Name=="청량리"),"Transfer"] <- "1|K|G"
+subway_data_G[["K"]][which(subway_data_G[["K"]]$Name=="청량리"),"Transfer"] <- "1|B|G"
+
+# 2. 
+subway_data_G[["6"]][which(subway_data_G[["6"]]$Name=="월곡"),"Transfer"] <- "G"
+
+# 3. 
+subway_data_G[["4"]][which(subway_data_G[["4"]]$Name=="길음"),"Transfer"] <- "G"
+
+# 4.
+subway_data_G[["UI"]][which(subway_data_G[["UI"]]$Name=="정릉"),"Transfer"] <- "G"
+
+# 5.
+subway_data_G[["3"]][which(subway_data_G[["3"]]$Name=="홍제"),"Transfer"] <- "G"
+
+# 6. 
+subway_data_G[["6"]][which(subway_data_G[["6"]]$Name=="디지털미디어시티"),"Transfer"] <- "A|K|G"
+subway_data_G[["A"]][which(subway_data_G[["A"]]$Name=="디지털미디어시티"),"Transfer"] <- "6|K|G"
+subway_data_G[["K"]][which(subway_data_G[["K"]]$Name=="디지털미디어시티"),"Transfer"] <- "6|A|G"
+
+# 7.
+subway_data_G[["9"]][which(subway_data_G[["9"]]$Name=="등촌"),"Transfer"] <- "G"
+
+# 8.
+subway_data_G[["5"]][which(subway_data_G[["5"]]$Name=="목동"),"Transfer"] <- "G"
+save(file="line_G/subway_data_G.RData", subway_data_G)
+
+data(transfer_station)
+transfer_station_G <- transfer_station
+transfer_name_G <- line_G %>% filter(Transfer!=0) %>% select(Name) %>% t() %>% as.character
+
+line_G_transfer_station <- line_G %>% 
+  dplyr::select(Name, lat, long, Transfer) %>% 
+  filter(Transfer!=0) %>% 
+  mutate(Transfer = paste0(Transfer, "|G"))
+
+transfer_station_G <- rbind(transfer_station_G[-which(transfer_station_G$Name%in%c('청량리', '디지털미디어시티')),], line_G_transfer_station)
+
+save(file="line_G/transfer_station_G.RData", transfer_station_G)
+
+data(subway_data_DT)
+
+subway_data_G_DT <- subway_data_G[["1"]]
+for(i in 2:length(subway_data_G)){
+  subway_data_G_DT <- rbind(subway_data_G_DT, subway_data_G[[i]])
+}
+
+save(file="line_G/subway_data_G_DT.RData", subway_data_G_DT)
+
+# 1. 청량리 환승가능 1/B/K/G
+# 2. 월곡 환승가능 6/G
+# 3. 길음 환승가능 4/G
+# 4. 정릉 환승가능 UI/G
+# 5. 홍제 환승가능 3/G
+# 6. 디지털미디어시티 환승가능 6/A/K/G
+# 7. 등촌 환승가능 9/G
+# 8. 목동 환승가능 5/G
+```
+
+```{r}
+load(file="../data/line_G.RData")
+load(file="../data/subway_data_G.RData")
+load(file="../data/subway_data_G_DT.RData")
+load(file="../data/transfer_station_G.RData")
+
+kable(line_G)
+```
+
+위 표와 같이 8개의 환승역이 포함된 19개의 지하철 역에 대한 지하철 네트워크를 구축하였다. 이 과정을 통하여 신규노선이 반영되었을 때, 이를 반영한 네트워크를 구축하여 시뮬레이션할 수 있다.
+
+```{r, eval=FALSE}
+subway_data_G[[1]]
+subway_data_G[[3]]
+subway_data_G[[5]]
+subway_data_G[[6]]
+subway_data_G[[11]]$Time <- round(subway_data_G[[11]]$Time,2)
+subway_data[[11]]$Time <- round(subway_data[[11]]$Time,2)
+subway_data_G[[14]]
+subway_data_G[[22]]
+subway_data_G[["4"]][18,"Transfer"] <- "1|A|K_A"
+subway_data_G[[22]][1,"Transfer"] <- "1|4|K_A"
+
+#save(file="line_G/subway_data_G.RData", subway_data_G)
+#save(file="line_G/subway_data_G_DT.RData", subway_data_G_DT)
+```
+
+
+### 1.3 구성한 네트워크를 통한 최단경로 데이터베이스 구축
+
+```{r}
+load(file="../data/subway_route_G_0411.RData")
+load(file="../data/line_G_simulation_data.RData")
+load(file="../data/line_G_simulation_fun.RData")
+```
+
+앞 과정을 통하여 구축한 지하철 네트워크를 통하여 최단거리 데이터베이스를 구축하였다. 이용객 개별 승하차 데이터포함된 241개역과 강북횡단선 신설 지하철역이 포함된 총 254개 역에 대하여 모든 경로를 포함하였다.
+
+#### 1.3.1 최단경로 함수
+
+앞에서 설명한 지하철 최단경로 알고리즘을 반영한 최단경로 함수의 결과는 다음과 같다. 
+
+```{r, eval=FALSE}
+for(i in 1:length(subway_route_G_0411)){
+  subway_route_G_0411[[i]]$Path <- subway_route_G_0411[[i]]$Path[,c("Code","Name","Line",
+                                                                    "ExCode","lat","long",
+                                                                    "Transfer","Dist","Time")]
+  subway_route_G_0411[[i]]$Path1 <- subway_route_G_0411[[i]]$Path1[,c("Code","Name","Line",
+                                                                    "ExCode","lat","long",
+                                                                    "Transfer","Dist","Time")]
+  subway_route_G_0411[[i]]$Path2 <- subway_route_G_0411[[i]]$Path2[,c("Code","Name","Line",
+                                                                    "ExCode","lat","long",
+                                                                    "Transfer","Dist","Time")]
+  subway_route_G_0411[[i]]$Path3 <- subway_route_G_0411[[i]]$Path3[,c("Code","Name","Line",
+                                                                    "ExCode","lat","long",
+                                                                    "Transfer","Dist","Time")]
+  subway_route_G_0411[[i]]$Path4 <- subway_route_G_0411[[i]]$Path4[,c("Code","Name","Line",
+                                                                    "ExCode","lat","long",
+                                                                    "Transfer","Dist","Time")]
+  subway_route_G_0411[[i]]$Path5 <- subway_route_G_0411[[i]]$Path5[,c("Code","Name","Line",
+                                                                    "ExCode","lat","long",
+                                                                    "Transfer","Dist","Time")]
+}
+#save(file="../data/subway_route_G_0411.RData", subway_route_G_0411)
+```
+
+```{r, echo=TRUE}
+subway_route_G_0411[["길음-청량리"]]
+```
+
+길음역에서 청량리역으로의 최단경로 함수의 결과에는 앞에서 정의한 최단경로 알고리즘과 동일하게 Info, Count, Time, 그리고 Path로 구성된다. Info는 이동경로에 대한 요약 정보이다. Count와 Time은 경유역 수와 소요시간에 대한 정보이며, Path는 경유하는 지하철 역에 대한 정보를 제공한다.
+
+
+\newpage
+
+#### 1.3.2 최단경로 데이터베이스 제작
+
+우선 `출발역 -> 도착역`의 한정된 정보만 제공되는 데이터를 이용하여 분석목적에 적합한 형태로 재정의하는 과정이 필요하다. 이는 이동 간 경유하는 모든 구간에 대한 정보를 포함한 새로운 데이터 구조를 말한다. 예를 들어서 강북횡단선을 이용한다면, 길음역에서 출발하여 청량리역에 도착하는 경우, `길음-종암사거리`, `종암사거리-월곡`, `월곡-홍릉` 그리고 `홍릉-청량리`로 4개의 구간을 경유할 것이다. 이와 같은 방식으로 모든 지하철 경로의 이동 정보에 대한 데이터를 포함한 데이터베이스를 제작하였다. 
+
+
+```{r}
+shortestpath_db_G <- readRDS(file="../data/shortestpath_db_G.RDS")
+```
+
+또한 최단거리 데이터베이스는 출발역과 도착역 쌍에 대하여는 순서가 바뀌어도 동일한 결과를 산출하므로 우선 254개의 지하철 역에 대하여 254x254 상삼각행렬에 해당하는 경우를 구한 후, 하삼각행렬에 해당하는 경우는 순서가 바꾸어진 결과를 산출하는 함수를 제작하여 완성하였다. 
+
+함수는 출발역과 도착역을 입력하면 이동경로대 대하여 산출한다.
+
+`get_shortestpath(depart, arrival)`
+
+```{r, echo=TRUE}
+depart <- "청량리"
+arrival <- "길음"
+get_shortestpath <- function(depart, arrival){
+  result <- shortestpath_db_G %>% 
+    filter(set==paste0(depart, "-", arrival))
+    if(nrow(result)==0){
+      result <- shortestpath_db_G %>% 
+        filter(set==paste0(arrival, "-", depart))
+      ord_f <- result$from
+      result$from <- result$to
+      result$to <- ord_f
+      dat_inv_change <- result
+      for(i in 1:nrow(dat_inv_change)){
+        dat_inv_change[i,] <- result[(nrow(result)+1-i),]
+      }
+      dat_inv_change$set <-
+        rep(paste0(depart, "-", arrival), i)
+      result <- dat_inv_change
+    }
+  result
+}
+
+get_shortestpath(depart, arrival)
+get_shortestpath(depart=arrival, arrival=depart)
+
+```
+
+```{r, eval=FALSE}
+route_set <- route_choose %>% 
+  dplyr::select(ride_on, ride_off) %>%
+  unique() %>% mutate(route = paste0(ride_on, "-", ride_off)) %>% 
+  dplyr::select(route) %>% t() %>% as.character
+
+db_set <- unique(shortestpath_db_G$set) %>% t() %>% as.character
+
+diff_set <- setdiff(route_set, db_set)
+
+diff_set <- data.frame(diff_set) %>% 
+  separate(diff_set, c('depart', 'arrive'), sep="-", remove=FALSE)
+
+length(subway_route_G_0518)
+for(i in 1:nrow(diff_set)){
+  subway_route_G_0518[[as.character(diff_set$diff_set[i])]] <- 
+    shortestpath(as.character(diff_set$depart[i]), as.character(diff_set$arrive[i]))
+}
+
+i<-1
+name <- names(subway_route_G_0518)[i]
+depart <- str_split(name, "-")[[1]][1]
+arrival <- str_split(name, "-")[[1]][2]
+path_result <- get_path(depart, arrival)
+subway_route_G_path[[i]] <- change_ds_sna(path_result)
+names(subway_route_G_path)[[i]] <- name
+result <- subway_route_G_path[[name]]
+set <- rep(name, nrow(result))
+result_return <- cbind(set, result)
+  
+for(i in 2:length(subway_route_G_0518)){
+  name <- names(subway_route_G_0518)[i]
+  depart <- str_split(name, "-")[[1]][1]
+  arrival <- str_split(name, "-")[[1]][2]
+  path_result <- get_path(depart, arrival)
+  subway_route_G_path[[i]] <- change_ds_sna(path_result)
+  names(subway_route_G_path)[[i]] <- name
+  result <- subway_route_G_path[[name]]
+  set <- rep(name, nrow(result))
+  result_return <- rbind(result_return, cbind(set, result))
+}
+
+result_replace <- result_return %>% 
+  filter(set %in% diff_set$diff_set)
+set_re <- unique(result_replace$set)
+set_re <- data.frame(set_re) %>% 
+  separate(set_re, c('depart', 'arrive'), sep="-", remove=FALSE)
+set_rev_re <- set_re %>% 
+  mutate(set_re = paste0(arrive, "-", depart)) %>% 
+  rename(depart_x = arrive,
+         arrive = depart) %>% 
+  rename(depart = depart_x) %>% 
+  dplyr::select(set_re, depart, arrive)
+
+get_shortestpath <- function(depart, arrival){
+  result <- result_replace %>% 
+    filter(set==paste0(depart, "-", arrival))
+    if(nrow(result)==0){
+      result <- result_replace %>% 
+        filter(set==paste0(arrival, "-", depart))
+      ord_f <- result$from
+      result$from <- result$to
+      result$to <- ord_f
+      dat_inv_change <- result
+      for(i in 1:nrow(dat_inv_change)){
+        dat_inv_change[i,] <- result[(nrow(result)+1-i),]
+      }
+      dat_inv_change$set <-
+        rep(paste0(depart, "-", arrival), i)
+      result <- dat_inv_change
+    }
+  result
+}
+
+result_replace_rev <- get_shortestpath(set_rev_re$depart[1], set_rev_re$arrive[1])
+for(i in 2:nrow(set_rev_re)){
+  result_replace_rev <- rbind(result_replace_rev, get_shortestpath(set_rev_re$depart[i], set_rev_re$arrive[i]))
+}
+# result_return에서 필요한부분만 합칠 예정
+
+result_replace_tot <- rbind(result_replace, result_replace_rev)
+shortestpath_db_G <- rbind(shortestpath_db_G, result_replace_tot)
+# save(file="../data/shortestpath_db_G.RData", shortestpath_db_G)
+# save(file="../data/subway_route_G_0518.RData", subway_route_G_0518)
+```
+
+## 2. 강북횡단선에 대한 수요 예측
+
+본 연구에서는 신규노선인 강북횡단선에 대한 수요를 다음 2가지로 예측하려고 한다.
+
+  1. 역 주변정보를 이용한 승/하차 인원 예측
+  
+  2. 이용객 개별 승하차 데이터와 최단경로 데이터베이스를 이용한 이동경로 수요예측
+
+우선, 역 주변정보를 이용하여 강북횡단선에 포함된 지하철 역에 대한 승/하차 인원을 예측한다. 이를 통하여 강북횡단선 내 포함된 지하철 역을 이용하기 위하여 승/하차 하는 인원의 수를 예측할 수 있으며 이 또한 노선 수요를 확인하는데 있어서 중요한 지표가 될 것이다. 또한 강북횡단선이 포함된 최단경로 데이터베이스와 이용객 개별 승하차 데이터를 통하여 이동경로로써의 강북횡단선의 수요를 확인한다. 이는 실질적으로 강북횡단선을 이용하는 이용객들의 수요로써 환승 을 통하여 강북횡단선을 이용하는 경우이다.
+
+### 2.1 역 주변정보를 이용한 승/하차 예측
+
+강북횡단선을 포함한 지하철 네트워크 내 포함된 지하철 역은 총 479개이다. 이 중 서울 지역에 해당하는 302개역만을 선택하여 역 주변정보를 확인한다. 역 주변정보에는 반경 500m를 기준으로 한 집계구 정보와 시설 정보 등이 있다.
+
+```{r}
+load(file="../data/subway_data_G_DT.RData")
+station_seoul <- subway_data_G_DT %>% 
+  dplyr::select(Name, lat, long) %>% 
+  filter(!duplicated(Name))
+
+get_geocode_kakao <- function(address_lon, address_lat, daum_apikey) {
+  base_url <- "https://dapi.kakao.com/v2/local/geo/coord2regioncode.json"
+  parsed_page <- GET(paste0(base_url,
+                            '?x=', address_lon,
+                            "&y=", address_lat,
+                            '&input_coord=WGS84'),
+                     add_headers('Authorization' = paste0("KakaoAK ",daum_apikey)))
+  
+  
+  # json format을 list 형으로 변환
+  parsed_json <- content(parsed_page, "text")[[1]]
+  response <- fromJSON(parsed_json)[[2]]
+  result <- response %>% as_tibble
+  return(result)
+}
+daum_apikey <- '4febb0939357ec9fee82262801d5314b'
+
+index <- rep(NA, 479)
+for(i in 1:479){
+  result <- get_geocode_kakao(station_seoul$long[i], station_seoul$lat[i], daum_apikey)
+  index[i] <- result$address_name[1]
+}
+station_seoul$address <- index
+station_seoul <- station_seoul[str_detect(index, "서울"),]
+```
+
+#### 2.1.1 역별 주위정보 수집
+
+우선 역별 주위 정보 중 집계구 정보를 반영하기 위하여는 기준이 필요하다. 이때, 2017년 10월 기준 행정구역 자료를 이용하였다. 집계구 정보에는 공통적으로 `행정구역분류`가 포함되어져 있으며 이를 이용하여 데이터를 구성할 것이다.
+```{r merge_rule, echo=FALSE, message=FALSE}
+# 행정구역 통합 기준 셋
+# 행정구역 코드는 "AD_CD"로 통일
+gun_gu_code <- fread("../data/gungu_201710.csv", encoding = "UTF-8")
+name <- gun_gu_code[2,-11]
+gun_gu_code <- gun_gu_code[c(-1,-2),-11]
+colnames(gun_gu_code) <- as.character(name)
+head(gun_gu_code)
+
+names(gun_gu_code)[6] <- "AD_CD"
+gun_gu_code <- gun_gu_code[str_detect(gun_gu_code$AD_CD, "^11"),]
+```
+
+#### 2.1.2 [국가공간정보포털 내 인구주택총조사 통계_인구부문(2016)](http://data.nsdi.go.kr/dataset/20171206ds00009/resource/48c14840-4aca-4779-aed0-6e218404509f?inner_span=True)
+
+| 변수명      | 설명             |
+|-------------|------------------|
+| youngage    | 0~10세 인구      |
+| teenage     | 10대 인구        |
+| middleage1  | 20~30대 인구     |
+| middleage2  | 40~50대 인구     |
+| oldage      | 60세 이상 인구   |
+
+```{r population, echo=FALSE, message=FALSE, warning=FALSE}
+tot_ppl <- fread(file="../Z_SOP_OA/tot_ppl_2015.txt", sep="^")
+tot_ppl <- tot_ppl %>% 
+  filter(str_detect(tot_oa_cd, "^11")) %>%
+  rename(tot_pop = value) %>%
+  dplyr::select(-base_year, -item)
+
+ppl <- fread(file="../Z_SOP_OA/ppl_2015.txt", sep="^")
+ppl <- ppl %>% 
+  filter(str_detect(tot_oa_cd, "^11")) %>% 
+  dplyr::select(-base_year) %>% 
+  spread(item, value) %>% 
+  mutate_all(as.numeric)
+ppl[is.na(ppl)] <- 0
+ppl$tot_oa_cd <- as.character(ppl$tot_oa_cd)
+tot_ppl$tot_oa_cd <- as.character(tot_ppl$tot_oa_cd)
+ppl_var <- left_join(ppl, tot_ppl)
+ppl_var_handle <- ppl_var %>% 
+  mutate(youngage = in_age_001 + in_age_002,
+         teenage = in_age_003 + in_age_004,
+         middle1age = in_age_005 + in_age_006 + in_age_007 + in_age_008,
+         middle2age = in_age_009 + in_age_010 
+         + in_age_011 + in_age_012 + in_age_013,
+         oldage = in_age_014 + in_age_015 
+         + in_age_016 + in_age_017 + in_age_018 
+         + in_age_019 + in_age_020 + in_age_021) %>%
+  dplyr::select(tot_oa_cd, ends_with("age"), tot_pop) %>% 
+  as_tibble
+
+ppl_var_handle$tot_oa_cd <- str_sub(ppl_var_handle$tot_oa_cd, 1, 7)
+ppl_var_handle <- ppl_var_handle %>%
+  group_by(tot_oa_cd) %>% 
+  summarise(youngage = sum(youngage),
+            teenage = sum(teenage),
+            middleage1 = sum(middle1age),
+            middleage2 = sum(middle2age),
+            oldage = sum(oldage)) %>% 
+  rename(AD_CD = tot_oa_cd)
+
+glimpse(ppl_var_handle)
+```
+
+지하철 승하차 인원의 수를 예측하는 데 있어서 가장 중요한 것은 지하철 역 주위에 거주하고 있는 인구 수 일 것이다. 이는 실질적으로 지하철을 이용할 가능성이 있는 인원의 수이기 때문이다. 집계구 자료에는 행정구역분류 별 5세를 기준으로 인구 수에 대한 수치가 반영되어져 있다. 이를 위 표와 같이 총 5개의 범주로 나누었다. 
+
+#### 2.1.3 [국가공간정보포털 내 인구주택총조사 통계_사업체부문(2016)](http://data.nsdi.go.kr/dataset/20171206ds00006/resource/4f363f8b-d94b-4c66-a633-b5ea1989bf9d)
+
+| 사업체 코드        | 분류                                       |
+|--------------------|--------------------------------------------|
+| cp_bnu_003         | 제조업 수                                  |
+| cp_bnu_006         | 건설업 수                                  |
+| cp_bnu_007         | 도소매업 수                                |
+| cp_bnu_008         | 운수업 수                                  |
+| cp_bnu_009         | 숙박 및 음식점업 수                        |
+| cp_bnu_010         | 출판 영상, 방송통신 및 정보서비스업 수     |
+| cp_bnu_011         | 금융 및 보험업 수                          |
+| cp_bnu_012         | 부동산업 및 임대업 수                      |
+| cp_bnu_013         | 전문 과학 및 기술서비스업 수               |
+| cp_bnu_014         | 사업시설관리 및 사업지원 서비스업 수       |
+| cp_bnu_015         | 공공행정, 국방 및 사회보장 행정 수         |
+| cp_bnu_016         | 교육서비스업 수                            |
+| cp_bnu_017         | 보건업 및 사회복지 서비스업 수             |
+| cp_bnu_018         | 예술, 스포츠 및 여가관련 서비스업 수       |
+| cp_bnu_019         | 협회 및 단체, 수리 및 기타 개인서비스업 수 |
+
+또한 사업체 수 자료를 하나의 변수로 포함하였다. 예를 들어서 숙박 및 음식점 수가 많은 지역은 사람이 많이 거주하거나, 많이 몰리는 유흥지역일 것이다. 그리고, 각 사업체 수가 많이 밀집한 지역은 주요 근무지역으로써, 출퇴근시간대에 승/하차 인원 수가 급증하는 형태일 것이다. 변수를 반영하는 과정에서 서울 지역에는 농업, 임업 및 어업(001, 광업(002) 그리고 전기, 가스, 증기 및 수도사업(004) 사업체가 존재하지 않아 제거하였다. 또한 하수, 폐기물 처리, 원료재생 및 환경복원업(005) 사업체의 경우 목동과 가양동 2곳에만 존재하여 제외하였다.
+
+```{r company report, echo=FALSE, message=FALSE, warning=FALSE}
+company <- fread(file="../Z_SOP_OA/company_2015.txt", sep="^")
+company <- company %>% 
+  filter(str_detect(tot_oa_cd, "^11")) %>%
+  dplyr::select(-base_year) %>%
+  mutate_at(.var = 'value' ,as.numeric) 
+company[is.na(company)] <- 0
+
+company$tot_oa_cd <- str_sub(company$tot_oa_cd, 1, 7)
+company_handle <- company %>% 
+  group_by(tot_oa_cd, item) %>%
+  summarise(value=sum(value)) %>%
+  spread(item, value) %>%
+  rename(AD_CD = tot_oa_cd)
+company_handle[is.na(company_handle)] <- 0
+
+
+### 농업, 임업 및 어업 그리고 광업의 경우 서울 내 존재하지 않음
+### 전기, 가스, 증기 및 수도사업의 경우 포함
+### 하수, 폐기물 처리, 원료재생 및 환경복원업의 경우 2곳에서만 발견(목동, 가양동) 제외
+company_handle$cp_bnu_001 <- NULL
+company_handle$cp_bnu_002 <- NULL
+company_handle$cp_bnu_004 <- NULL
+company_handle$cp_bnu_005 <- NULL
+company_handle$cp_bnu_999 <- NULL
+
+glimpse(company_handle)
+```
+
+
+#### 2.1.4 [국가공간정보포털 내 인구주택총조사 통계_가구부분(2016)](http://data.nsdi.go.kr/dataset/20171206ds00007/resource/88154502-eaeb-4fed-b82c-359d3ad0ed27)
+
+| 변수명        | 설명                       |
+|---------------|----------------------------|
+| avg_gagu_ppl  | 평균 가구원수              |
+| gagu_gen1     | 1세대 가구 수              |
+| gagu_gen2     | 2세대 가구 수              |
+| gagu_gen3     | 3세대 가구 수              |
+| gagu_alone    | 1인 가구 수                |
+| gagu_etc      | 4세대 가구, 비혈연가구 수  |
+
+<반영 여부 고민 중>
+```{r gagu, echo=FALSE, warning=FALSE, message=FALSE, warning=FALSE}
+gagu <- fread(file="../Z_SOP_OA/gagu_tot_2015.txt", sep="^")
+gagu <- gagu %>% 
+  filter(str_detect(tot_oa_cd, "^11")) %>%
+  dplyr::select(-base_year) %>% 
+  spread(item, value) %>%
+  rename(tot_gagu = to_ga_001,
+         avg_gagu_ppl = to_ga_002)
+
+gagu$tot_oa_cd <- str_sub(gagu$tot_oa_cd, 1, 7)
+gagu_handle <- gagu %>%
+  group_by(tot_oa_cd) %>% 
+  summarise(tot_gagu = sum(tot_gagu),
+            avg_gagu_ppl = mean(avg_gagu_ppl)) %>% 
+  rename(AD_CD = tot_oa_cd)
+
+gagu_contents <- fread(file="../Z_SOP_OA/gagu_guseong_2015.txt", sep="^")
+gagu_contents <- gagu_contents %>% 
+  filter(str_detect(tot_oa_cd, "^11")) %>%
+  dplyr::select(-base_year) %>% 
+  spread(item, value) %>%
+  mutate_all(as.numeric) %>%
+  rename(gagu_gen1 = ga_sd_001,
+         gagu_gen2 = ga_sd_002,
+         gagu_gen3 = ga_sd_003,
+         gagu_alone = ga_sd_005)
+gagu_contents[is.na(gagu_contents)] <- 0
+gagu_contents <- gagu_contents %>%
+  group_by(tot_oa_cd) %>% 
+  mutate(gagu_etc = sum(ga_sd_004, ga_sd_006, ga_sd_999)) %>% 
+  dplyr::select(-ga_sd_004, -ga_sd_006, -ga_sd_999) %>%
+  ungroup %>%
+  mutate_at(.var='tot_oa_cd', as.character) %>% 
+  as_tibble 
+gagu_contents$tot_oa_cd <- str_sub(gagu_contents$tot_oa_cd, 1, 7)
+gagu_contents <- gagu_contents %>%
+  group_by(tot_oa_cd) %>%
+  summarise(gagu_gen1 = sum(gagu_gen1),
+            gagu_gen2 = sum(gagu_gen2),
+            gagu_gen3 = sum(gagu_gen3),
+            gagu_alone = sum(gagu_alone),
+            gagu_etc = sum(gagu_etc)) %>% 
+  rename(AD_CD = tot_oa_cd)
+
+gagu_merge <- left_join(gagu_handle, gagu_contents, by="AD_CD")
+
+gagu_merge$tot_gagu <- NULL
+
+glimpse(gagu_merge)
+```
+
+
+#### 2.1.5 [다음API](https://developers.kakao.com/docs/restapi/tool)를 이용하여 6가지 변수 선정(`대형마트`, `학교`, `학원`, `문화시설`, `관광명소`, `병원`)
+
+서울시 내 지하철 302개 역에 대하여 반경 500m 이내 `대형마트`, `학교`, `학원`, `문화시설`, `관광명소`, `병원` 시설 수를 변수로 추가하였다. 이는 다음 API를 통하여 구하였다.
+
+```{r use daumapi to get subwaystation nearby info, echo=FALSE, eval=FALSE}
+daum_apikey <- '4febb0939357ec9fee82262801d5314b'
+
+localdata_category <- function(address_lon, address_lat, radius_m, category_code) {
+  base_url <- "https://dapi.kakao.com/v2/local/search/category.json"
+  parsed_page <- GET(URLencode(paste(base_url,
+                                     '?category_group_code=', category_code,
+                                     "&y=", address_lat, '&x=', address_lon,
+                                     '&size=1&page=1&radius=', radius_m, 
+                                     sep='')),
+                     add_headers("Authorization" = paste("KakaoAK ",
+                                                         daum_apikey, sep='')))
+  
+  # json format을 list 형으로 변환
+  parsed_json <- content(parsed_page)
+  return(parsed_json$meta$total_count)
+}
+
+### category_code 종류
+# MT1(대형마트), CS2(편의점), PS3(어린이집, 유치원), SC4(학교), AC5(학원)
+# PK6(주차장), OL7(주유소, 충전소), SW8(지하철역), BK9(은행)
+# CT1(문화시설), AT4(관광명소), PO3(공공기관), AG2(중개업소)
+# AD5(숙박), FD6(음식점), CE7(카페), HP8(병원), PM9(약국)
+### 1차 상권은 사업장 이용고객의 60% - 70%를 포함하는 범위를 말하며, 점포인 경우는 약 500m 반경 이내의 지점을 말한다.  (도보 5분 거리) http://cfile219.uf.daum.net/attach/175F11304CA163B765B611
+### 1차 상권은 사업장 이용고객의 60% - 70%를 포함하는 범위를 말하며, 
+# 점포인 경우는 약 500m 반경 이내의 지점을 말한다.  (도보 5분 거리)
+# http://cfile219.uf.daum.net/attach/175F11304CA163B765B611
+
+#(`대형마트`, `학교`, `학원`, `문화시설`, `관광명소`, `병원`)
+market_info <- list()
+get_crawling_list <- c("MT1", "SC4", 'AC5', "CT1", "AT4", "HP8")
+for(i in 1:6){
+  station_seoul[,get_crawling_list[i]] <- 0
+  for(j in 1:302){
+  station_seoul[j,get_crawling_list[i]] <- 
+    localdata_category(as.numeric(station_seoul$long[j]),
+                       as.numeric(station_seoul$lat[j]), 
+                       radius_m = 500, 
+                       category_code = get_crawling_list[i])
+  }
+}
+head(station_seoul)
+
+colnames(station_seoul) <- c("station", "lat", "long", 
+                             "market_store", "school",
+                             "academy", "cultural_facility",
+                             "attraction","hospital", "address")
+
+```
+
+```{r}
+station_seoul_daum <- fread("../data/station_seoul.csv")
+station_seoul_daum <- station_seoul_daum %>% 
+  dplyr::select(-V1) %>% 
+  dplyr::select(station, lat, long, 
+                market_store, school,
+                academy, cultural_facility,
+                attraction, hospital)
+
+glimpse(station_seoul_daum)
+```
+
+
+#### 2.1.6 버스정류장 위치데이터 이용 반경 500m 이내 버스정류장 수
+
+지하철 승/하차 인원 수는 역 주위 버스정류장의 수와 밀접한 관련이 있다. 왜냐하면 버스와 지하철 간 환승시스템으로 인하여 지하철과 버스를 같이 이용하는 경우가 많기 때문이다. 버스정류장 위치데이터는 공공데이터 포털에 요청하여 얻을 수 있었다. 이를 이용하여 수도권 내 11000여 곳의 버스정류장과 302개의 지하철역 사이의 거리행렬 구하여 반경 500m 이내의 버스정류장 수를 확인하였다. 
+```{r use dist matrix to get bus station count, echo=FALSE, eval=FALSE}
+bus_station <- fread(file="../data/bus_station_longlat.csv", encoding="UTF-8")
+
+bus_station <- bus_station %>% 
+  dplyr::select(정류소명, X좌표, Y좌표) %>%
+  rename(long = X좌표, lat = Y좌표)
+
+# 11069 x 222 매트릭스 제작 후 거리행렬 생성
+dist_mat <- data.frame(matrix(0, 11069, 302))
+
+for(i in 1:11069){
+  for(j in 1:302){
+    dist_mat[i,j] <-
+      distHaversine(as.numeric(bus_station[i,c("long", "lat")]),
+                    as.numeric(station_seoul[j,c("long","lat")]))
+  }
+}
+
+# 역 기준 반경 500m 이내 지점 수 확인
+count <- c()
+for(i in 1:302){
+  count[i] <- sum(dist_mat[,i]<=500)
+}
+
+station_seoul$bus_station <- count
+
+# 환승 가능한 노선 수에 대한 변수 <- 지하철 승하차와 관련 없음.
+#tot_station_longlat$transfer_available <- 0
+#data("transfer_station")
+#for(i in 1:81){
+#transfer_station$T_count[i] <-
+#length(str_split(transfer_station$Transfer, "[|]")[[i]])
+#}
+
+#tot_station_longlat$transfer_available[which(tot_station_longlat$station%in%transfer_station$Name)] <- transfer_station$T_count
+head(station_seoul)
+```
+
+```{r}
+station_seoul_bus <- fread("../data/station_seoul.csv")
+station_seoul_bus <- station_seoul_bus %>% 
+  dplyr::select(-V1) %>% 
+  dplyr::select(station, lat, long, bus_station)
+
+glimpse(station_seoul_bus)
+```
+
+
+#### 2.1.7 지하철 반경 500m 이내 용도지역 점수
+
+용도지역이란 '토지의 이용 및 건축물의 용도,  건폐율, 용적률, 높이 등을 제한함으로써 토지를 경제적  효율적으로 이용하고 공공복리의 증진을 도모하기 위하여 서로 중복되지 아니하게 도시관리계획으로 결정하는 지역`을 말한다. 용도지역 종류는 서울시와 같은 도시지역에서는 크게 주거지역, 상업지역, 공업지역, 녹지지역으로 구분하고 있으며, 개념은 다음과 같다.
+
+- 주거지역 : 거주의 안녕과 건전한 생활환경의 보호를 위하여 필요한 지역 
+- 상업지역 : 상업 그 밖의 업무의 편익증인을 위하여 필요한 지역
+- 공업지역 : 공업의 편익증진을 위하여 필요한 지역
+- 녹지지역 : 자역환경, 농지 및 산림의 보호, 보건위생, 보안과 도시의 무질서한 확산을 방지하기 위하여 녹지의 보전이 필요한 지역
+
+국토 용도지역은 크게 상업, 주거, 공업, 녹지, 이외기타로 5가지로 구성한다. (서울시 도시계획과 참고)
+
+이를 참고하여 서울시 용도지역 shape 파일 내 용도지역 구분으로 준주거지역, 주거지역, 상업지역, 공업지역, 자연녹지지역, 기타사업, 도시계획 시설, 용도지역, 토지구획정리사업와 같이 구분되어 있으므로, 크게 주거지역, 상업지역,공업지역, 자연녹지지역, 기타로 구분하였다. 또한 [토지이용규제정보서비스](http://luris.molit.go.kr/web/actreg/lawlanguage/WebLawLanguageView.jsp?termsNo=00420&termsIndexNm=)를 참고하였다. 준주거지역이란 '주거기능을 위주로 이를 지원하는 일부 상업기능 및 업무기능을 보완하기 위하여 필요한 지역'으로 주거지역과 상업지역을 모두 고려하기 위하여 새로운 용도지역으로 구분한 후 주거지역과 상업지역에 점수를 나누었다.
+ 
+  1. 서울시 shape파일 내부에 100m 간격으로 grid를 생성. 
+
+  2. 302개의 지하철역에 대하여 반경 500m 내의 속하는 grid point를 확인.
+
+  3. 용도점수는 역에 가까운 용도일 수록 높은 점수를 부여하기 위하여 gaussian kernel을 통해 weight 계산
+    
+    $gaussian \space kernel : \space exp(-\frac{1}{\sigma} \times (origin - grid)^2)$
+
+  4. 용도별 가중합 점수 계산
+  
+```{r usezoning, fig.width=5, fig.height=3}
+usezoning <- readOGR(dsn="../data", layer="seoul_usezoning",
+                     encoding = "UTF-8", verbose = FALSE)
+
+## set cellsize : set 100m(almost) distance for grid
+cs <- c(0.00092, 0.0009)
+grdpts <- makegrid(usezoning, cellsize = cs)
+spgrd <- SpatialPoints(grdpts, proj4string = CRS(proj4string(usezoning)))
+spgrdWithin <- SpatialPixels(spgrd[usezoning,])
+
+## match with shp data file
+inusz <- over(spgrdWithin, usezoning)
+
+## make dataset
+gridpoint <- spgrdWithin@coords
+gridpoint_usz <- cbind(gridpoint, as.character(inusz$LABEL))
+gridpoint_usz <- as.data.frame(gridpoint_usz)
+colnames(gridpoint_usz) <- c("long", "lat", "usz")
+
+## make rules about category about usezoning
+gridpoint_usz$type <- ifelse(str_detect(gridpoint_usz$usz, "준주거"),
+                                 "준주거", as.character(gridpoint_usz$usz))
+gridpoint_usz$type <- ifelse(str_detect(gridpoint_usz$type, "주거"),
+                                 "주거", as.character(gridpoint_usz$type))
+gridpoint_usz$type <- ifelse(str_detect(gridpoint_usz$type, "상업"),
+                                 "상업", as.character(gridpoint_usz$type))
+gridpoint_usz$type <- ifelse(str_detect(gridpoint_usz$type, "공업"),
+                                 "공업", as.character(gridpoint_usz$type))
+gridpoint_usz$type <- ifelse(str_detect(gridpoint_usz$type, "자연녹지지역"),
+                                 "녹지", as.character(gridpoint_usz$type))
+gridpoint_usz$type <- ifelse(str_detect(gridpoint_usz$type, "기타사업"),
+                                 "etc", as.character(gridpoint_usz$type))
+gridpoint_usz$type <- ifelse(str_detect(gridpoint_usz$type, "도시계획 시설|용도지역|토지구획정리사업"),
+                                 "etc", as.character(gridpoint_usz$type))
+## check ratio about usezoning type
+# table(gridpoint_usz$type)
+
+## preprocessing
+gridpoint_usz$long <- as.character(gridpoint_usz$long)
+gridpoint_usz$lat <- as.character(gridpoint_usz$lat)
+gridpoint_usz$usz <- as.character(gridpoint_usz$usz)
+
+# edit gausskernel in KRLS pack.
+gausskernel_Haversine <- function (origin, mat = NULL, sigma = NULL) {
+    return(exp(-1 * as.matrix(distHaversine(origin, mat)^2)/sigma))
+}
+
+find_usezoning_circle <- function(long_rec, lat_rec, sd_select){
+  longcut <- gridpoint_usz[which(gridpoint_usz$long <= long_rec + 0.00566 &
+                                 gridpoint_usz$long >= long_rec -0.00566),]
+  ### long 기준으로 0.00566정도는 좌우로 약 500m 거리의 지점을 의미합니다.
+  latcut <- longcut[which(longcut$lat <= lat_rec + 0.00449 &
+                          longcut$lat >= lat_rec - 0.00449),]
+  ### lat 기준으로 0.00449정도는 상하로 약 500m 거리의 지점을 의미합니다.
+  ### 즉, 역 기준으로 1km의 정사각형 구간으로 공간을 한정합니다.
+  ### 이후 distHaversine 수식을 이용하여 500m 내에 포함되는 spot만 간추려냅니다.
+  dist <- c()
+  for(i in 1:nrow(latcut)){
+    dist[i] <- distHaversine(c(as.numeric(latcut$long[i]),
+                               as.numeric(latcut$lat[i])),
+                               c(long_rec, lat_rec))
+  }
+  latcut_result <- latcut[which(dist <= 500 & dist !=0),]
+  latcut_result$dist <- dist[which(dist <= 500 & dist !=0)]
+  if(length(dist)==1){
+    latcut_result <- latcut
+  }
+  latcut_result$weight_sd <- 
+    gausskernel_Haversine(origin = c(long_rec, lat_rec),
+                          mat = data.matrix(latcut_result[,c("long","lat")]),
+                          sigma = sd_select^2)[,1]
+  if(length(dist)==1){
+    latcut_result$weight_sd <- 0
+  }
+  result <- latcut_result %>% 
+    group_by(type) %>% 
+    summarise(ratio=sum(weight_sd)) %>% spread(type, ratio)
+  gg <- ggplot(latcut_result, 
+               aes(x=long, y=lat, col = type, size=weight_sd)) + 
+    geom_point() + coord_fixed() + 
+    scale_x_discrete(breaks=c(as.numeric(seq(min(latcut_result$long), 
+                                  max(latcut_result$long), 0.0002)))) + 
+    scale_y_discrete(breaks=c(as.numeric(seq(min(latcut_result$lat), 
+                                  max(latcut_result$lat), 0.0002))))
+
+  n_point <- nrow(latcut_result)
+  result_list <- list(table = result, n = n_point, plot = gg)
+  result_list
+}
+
+```
+
+```{r, echo=TRUE, fig.width=5, fig.height=3, fig.align='center'}
+station_seoul[21,]
+find_usezoning_circle(long_rec = as.numeric(station_seoul$long[21]),
+                      lat_rec = as.numeric(station_seoul$lat[21]),
+                      sd_select = 500)
+```
+
+```{r echo=FALSE, eval=FALSE}
+station_seoul$usz_sang <- 0
+station_seoul$usz_ju <- 0
+station_seoul$usz_green <- 0
+station_seoul$usz_etc <- 0
+station_seoul$usz_gong <- 0
+
+
+for(i in 1:302){
+  usz_result <- tryCatch(find_usezoning_circle(long_rec = as.numeric(station_seoul$long[i]),
+                                      lat_rec = as.numeric(station_seoul$lat[i]),
+                                      sd_select = 500)$table,
+                         error = function(e) {usz_result = as_tibble(data.frame("상업"=0))})
+  n <- ncol(usz_result)
+  for(j in 1:n){
+    if(names(usz_result[j])=="공업"){
+      station_seoul$usz_gong[i] <- usz_result$공업
+    }else if(names(usz_result[j])=="상업"){
+      station_seoul$usz_sang[i] <- usz_result$상업
+    }else if(names(usz_result[j])=="주거"){
+      station_seoul$usz_ju[i] <- usz_result$주거
+    }else if(names(usz_result[j])=="녹지"){
+      station_seoul$usz_green[i] <- usz_result$녹지
+    }else if(names(usz_result[j])=="etc"){
+      station_seoul$usz_etc[i] <- usz_result$etc
+    }else if(names(usz_result[j])=="준주거"){
+      station_seoul$usz_ju[i] <- station_seoul$usz_ju[i] + usz_result$준주거/2
+      station_seoul$usz_sang[i] <- station_seoul$usz_sang[i] + usz_result$준주거/2
+    }
+  }
+}
+
+station_seoul$usz_ju <- station_seoul$usz_ju
+station_seoul$usz_gong <- station_seoul$usz_gong 
+station_seoul$usz_sang <- station_seoul$usz_sang
+station_seoul$usz_green <- station_seoul$usz_green 
+station_seoul$usz_etc <- station_seoul$usz_etc
+
+#write.csv(file="../data/station_seoul.csv", station_seoul)
+```
+
+```{r, include=FALSE}
+station_seoul <- fread("../data/station_seoul.csv")
+station_seoul <- station_seoul %>%
+  dplyr::select(-V1)
+```
+
+```{r merge all dataset, echo=FALSE, message=FALSE, warning=FALSE}
+gungu_info <- gagu_merge %>% 
+  left_join(company_handle) %>% 
+  left_join(ppl_var_handle) %>%
+  left_join(gun_gu_code)
+```
+
+
+#### 2.1.8 지하철 역 별 주위 정보 반영방법
+
+서울시 행정구역 shp 파일을 이용하여 앞과 동일하게 100m 간격으로 점을 찍는 과정을 통해 grid를 생성하였다. 그 후 302개의 역에 대하여 반경 500m에 속하는 행정구역을 확인하고, 해당 행정구역들의 grid의 수를 이용하여 가중평균을 계산하였다. 
+
+```{r 500m radius address mean result, fig.width=5, fig.height=3}
+seoul <- readOGR(dsn="../seoulshp", layer="TL_SCCO_EMD",
+                 encoding = "UTF-8", verbose = FALSE)
+seoul <- seoul[str_detect(seoul@data$EMD_CD, "^11"),]
+seoul <- spTransform(seoul, CRS("+proj=longlat +datum=NAD83"))
+
+## set cellsize : set 100m(almost) distance for grid
+cs <- c(0.00092, 0.0009)
+grdpts <- makegrid(seoul, cellsize = cs)
+spgrd <- SpatialPoints(grdpts, proj4string = CRS(proj4string(seoul)))
+spgrdWithin <- SpatialPixels(spgrd[seoul,])
+
+## match with shp data file
+inshp <- over(spgrdWithin, seoul)
+
+## make dataset
+gridpoint <- spgrdWithin@coords
+gridpoint_seoul <- cbind(gridpoint, as.character(inshp$EMD_CD))
+gridpoint_seoul <- as.data.frame(gridpoint_seoul)
+colnames(gridpoint_seoul) <- c("long", "lat", "code")
+
+## preprocessing
+gridpoint_seoul$long <- as.character(gridpoint_seoul$long)
+gridpoint_seoul$lat <- as.character(gridpoint_seoul$lat)
+gridpoint_seoul$code <- as.character(gridpoint_seoul$code)
+
+gun_gu_code2 <- gun_gu_code
+gun_gu_code2 <- gun_gu_code2 %>%
+  dplyr::select(AD_CD, 법정동, 법정동코드)
+gun_gu_code2$법정동코드 <- str_sub(gun_gu_code2$법정동코드, 1,8)
+gun_gu_code2$code <- gun_gu_code2$법정동코드
+gridpoint_seoul <- left_join(gridpoint_seoul, gun_gu_code2)
+
+## make function
+find_emd_circle <- function(long_rec, lat_rec){
+  longcut <- gridpoint_seoul[which(gridpoint_seoul$long <= long_rec + 0.00566 &
+                                 gridpoint_seoul$long >= long_rec -0.00566),]
+  ### long 기준으로 0.00566정도는 좌우로 약 500m 거리의 지점을 의미합니다.
+  latcut <- longcut[which(longcut$lat <= lat_rec + 0.00449 &
+                          longcut$lat >= lat_rec - 0.00449),]
+  ### lat 기준으로 0.00449정도는 상하로 약 500m 거리의 지점을 의미합니다.
+  ### 즉, 역 기준으로 1km의 정사각형 구간으로 공간을 한정합니다.
+  ### 이후 distHaversine 수식을 이용하여 500m 내에 포함되는 spot만 간추려냅니다.
+  dist <- c()
+  for(i in 1:nrow(latcut)){
+    dist[i] <- distHaversine(c(as.numeric(latcut$long[i]),
+                             as.numeric(latcut$lat[i])),
+                             c(long_rec, lat_rec))
+  }
+  latcut_result <- latcut[which(dist <= 500),]
+  result <- latcut_result %>% 
+    dplyr::select(AD_CD) %>%
+    group_by(AD_CD)%>%
+    summarise(ratio=n()) %>%
+    spread(AD_CD, ratio)
+  gg <- ggplot(latcut_result, aes(x=long, y=lat, col=AD_CD)) + 
+    geom_point()  + coord_fixed() + 
+    scale_x_discrete(breaks=c(as.numeric(seq(min(latcut_result$long), 
+                                  max(latcut_result$long), 0.0002)))) + 
+    scale_y_discrete(breaks=c(as.numeric(seq(min(latcut_result$lat), 
+                                  max(latcut_result$lat), 0.0002))))
+  result_list <- list(table = result, plot = gg)
+  result_list
+}
+```
+
+```{r, echo=TRUE, fig.width=5, fig.height=3, fig.align='center'}
+station_seoul[21,]
+find_emd_circle(long_rec = station_seoul$long[21], 
+                lat_rec = station_seoul$lat[21])
+
+station_seoul[33,]
+find_emd_circle(long_rec = station_seoul$long[33], 
+                lat_rec = station_seoul$lat[33])
+```
+
+```{r echo=FALSE, eval=FALSE}
+get_mean_grid <- data.frame(matrix(0, 302,26))
+for(i in 1:302){
+  result <- find_emd_circle(long_rec = station_seoul$long[i], 
+                            lat_rec = station_seoul$lat[i])$table
+  gugun_info_result <- gungu_info %>%
+    filter(AD_CD %in% names(result)) %>%
+    dplyr::select(-시도, -시군구, -행정구역명,-행정동,
+                  -행정기관코드, -법정동, -행정기관코드,
+                  -법정동코드, -관할지역, -`행정동 영문명칭`)
+  gugun_info_result <- gugun_info_result %>%
+    arrange(AD_CD) %>% dplyr::select(-AD_CD) %>% unique()
+  resultset <- data.matrix(result) %*% data.matrix(gugun_info_result) / rowSums(result)
+  resultset <- data.frame(resultset)
+  get_mean_grid[i,] <- resultset
+}
+
+colnames(get_mean_grid) <- colnames(resultset)
+result <- get_mean_grid
+result <- cbind(station=station_seoul$station, result)
+
+station_seoul_info <- station_seoul %>% 
+  left_join(result)
+```
+
+```{r load data hidden2, include=FALSE}
+#save(file="../data/station_seoul_info.RData", station_seoul_info, gungu_info)
+load(file="../data/station_seoul_info.RData")
+#load(file="line_G/data/station_seoul_info.RData")
+```
+
+
+#### 2.1.9 역별 환승노선 수 
+
+```{r}
+line_available_list <- subway_data_DT %>%
+  rbind(line_G %>% dplyr::select(Name, Line, lat, long,
+                                 Transfer, Dist, Time, ExCode)) %>% 
+  filter(Name %in% station_seoul_info$station) %>% 
+  filter(!duplicated(Name)) %>% 
+  mutate(tr_line = ifelse(Transfer !=0, paste0(Line, "|", Transfer), Line)) %>% 
+  dplyr::select(Name, tr_line) 
+
+line_available <- c()
+for(i in 1:nrow(line_available_list)){
+  line_available[i] <- nrow(str_locate_all(line_available_list$tr_line, "[|]")[[i]]) + 1
+}
+
+station_seoul_info$line_available <- line_available
+```
+
+
+#### 2.1.10 최종데이터
+
+1> 302개 지하철역을 대상으로 41개의 주위정보 데이터
+
+  * 지하철 위치정보 : lat, long, address
+  
+  * 500m 반경 시설정보 : market_store, school, academy, cultural_facility, attraction, hospital, bus_station, line_available
+  
+  * 5가지 용도지역 비율 : usz_sang, usz_ju, usz_green, usz_etc, usz_gong
+  
+  * 가구 수 : avg_gagu_ppl, gagu_gen1, gagu_gen2, gagu_gen3, gagu_alone, gagu_etc
+  
+  * 직종별 종사자 수 : cp_bnu_003, cp_bnu_006, cp_bnu_007, cp_bnu_008, cp_bnu_009, cp_bnu_010, cp_bnu_011, cp_bnu_012, cp_bnu_013,
+  cp_bnu_014, cp_bnu_015, cp_bnu_016, cp_bnu_017, cp_bnu_018, cp_bnu_019
+  
+  * 인구 수 : youngage, teenage, middleage1, middleage2, oldage
+  
+```{r}
+glimpse(station_seoul_info)
+```
+
+2> 4월 한달간 승/하차 데이터베이스
+
+  - 이용객 개별 승하차 데이터 내 출발역/도착역을 기준으로 데이터셋 생성 
+  
+  - 역별 요일(일-토)/시간대(지하철운행시간)/승하차 인원 수의 평균값
+
+```{r, preproc for station count func, eval=FALSE}
+load(file="/home/students/kson/route_04.RData")
+
+station_count <- function(station){
+  station_count <- route_04 %>% 
+    filter(up_Name==station|down_Name==station)
+  station_count_up <- station_count %>% 
+    filter(up_Name==station) %>% 
+    group_by(Date, Time, up_Name) %>% 
+    summarise(n = n()) %>% 
+    mutate(key = "up") %>%
+    dplyr::select(Date, Time, key, n) %>%
+    as_tibble
+  station_count_down <- station_count %>%
+    filter(down_Name==station) %>% 
+    group_by(Date, Time, down_Name) %>% 
+    summarise(n = n()) %>%
+    mutate(key = "down") %>% 
+    dplyr::select(Date, Time, key, n) %>%
+    as_tibble
+  result <- rbind(station_count_up, station_count_down)
+  colnames(result) <- c("Date", "Time", "key", station)
+  result$Time <- ifelse(str_count(result$Time)==1,
+                        paste0(0, result$Time), result$Time)
+  return(result)
+}
+
+tot_station <- str_sort(unique(route_04$up_Name))
+
+result <- station_count(tot_station[1])
+
+for(i in 2:241){
+  add <- station_count(tot_station[i])
+  result <- result %>% full_join(add)
+}
+
+```
+
+```{r}
+#* 역별 날짜/시간대별 승/하차 카운트 계산
+#* 역별 요일/시간대별 평균값으로 계산
+load(file="../data/ridership_04.RData")
+#ridership_04$key <- ifelse(ridership_04$key=="up", "on", "off")
+#ridership_04 <- rename(ridership_04, on_off = key)
+#save(file="../data/ridership_04.RData", ridership_04)
+ridership_04[is.na(ridership_04)] <- 0
+
+
+Date_format <- data.frame(Date=unique(ridership_04$Date),
+Day=c(rep(c("Sun", "Mon", "Tue", "Wed", "Thr", "Fri", "Sat"),4), "Sun", "Mon"))
+
+ridership_04_mean <- ridership_04 %>% 
+  gather(station, count, colnames(ridership_04)[-1:-3]) %>% 
+  left_join(Date_format) %>%
+  group_by(Day, Time, on_off, station) %>% 
+  summarise(mean_count = mean(count))
+
+ridership_04_mean
+
+ridership_mean_infoset <- ridership_04_mean %>% 
+  left_join(station_seoul_info) %>% 
+  na.omit()
+```
+
+
+### 2.2 알고리즘을 이용한 승하차 수요 예측
+
+이용객 개별 승하차 데이터에는 서울시 내 지하철 역 302개 중 222개의 승/하차 데이터만 계산할 수 있다. 따라서 222개의 지하철 역 승/하차 데이터를 통하여 나머지 80개 역에 대한 승/하차 값을 알고리즘을 통하여 예측한다. 최종결과에는 222개의 실제값과 80개의 예측값을 결합하여 총 302개 역에 대한 수요값을 산출하는 방식으로 구성한다.
+
+1. `predict_count_rf(input_data, day_choose, time_choose, up_down)` 
+
+랜덤포레스트 알고리즘을 적용한 함수를 제작하여 요일, 시간대 그리고 승/하차를 선택하면 그 시점의 이용객 승하차 데이터베이스를 통하여 수요값을 예측한다.
+
+  - 요일 : Sun - Sat 중 선택
+
+  - 시간대 : 00,01,02,04-23 중 선택
+
+  - 승하차 : 승/하차 중 선택
+  
+여기서 2개의 하이퍼파라미터를 고려해주어야 한다. 이때 하이퍼 파라미터 선정 기준은 다음과 같다.
+
+    1. `mtry`란 노드를 나눌때 있어서 고려하는 변수의 개수라고 이해하면 된다. 여기서 랜덤포레스트 회귀의 경우 통상 `mtry`를 사용한 변수의 1/3을 사용한다.
+
+    2. `ntree`란 나무의 개수로 랜덤포레스트에서 500개의 개별 의사결정나무를 생성하고 비교할 때 사용된다.
+
+```{r}
+ridership_mean_infoset
+station_seoul_info
+station_predict <- setdiff(station_seoul_info$station, ridership_mean_infoset$station)
+
+ridership_mean_infoset_train <- ridership_mean_infoset %>% 
+  ungroup %>% dplyr::select(-station, -usz_green, -address) %>% 
+  mutate(Time = as.numeric(Time), on_off = as.factor(on_off))
+
+rpart.ct <- rpart.control(xval=10,cp=0.0001)
+
+rpart_fit <- rpart(formula=mean_count~., 
+                   data=ridership_mean_infoset_train, 
+                   method="anova", control=rpart.ct)
+plotcp(rpart_fit)
+printcp(rpart_fit)
+
+plot(rpart_fit)
+text(rpart_fit)
+rpart_fit$cptable[which.min(rpart_fit$cptable[,"xerror"]),] %>% 
+  kable(col.names = "값", caption = "오분류율을 최소로 하는 cp값")
+
+day_choose <- "Fri" ; time_choose <- "20" ; on_off_choose <- "off"
+new_data <- station_seoul_info %>% 
+  filter(station %in% station_predict) %>%
+  dplyr::select(-station, -usz_green, -address) %>% 
+  mutate(Day = day_choose, Time = time_choose, on_off = on_off_choose) %>% 
+  mutate(Time = as.numeric(Time), on_off = as.factor(on_off)) %>% 
+  dplyr::select(colnames(ridership_mean_infoset_train)[-4])
+
+station_seoul_info %>% 
+  filter(station %in% station_predict) %>% 
+  mutate(pred = predict(rpart_fit, new_data))
+ 
+```
+
+```{r}
+predict_count_rpart <- function(day_choose = "Fri", time_choose = "20", on_off_choose = "off"){
+  station_predict <- setdiff(station_seoul_info$station,
+                             ridership_mean_infoset$station)
+  new_data <- station_seoul_info %>% 
+    filter(station %in% station_predict) %>%
+    dplyr::select(-station, -usz_green, -address) %>% 
+    mutate(Day = day_choose, Time = time_choose, on_off = on_off_choose) %>% 
+    mutate(Time = as.numeric(Time), on_off = as.factor(on_off)) %>% 
+    dplyr::select(colnames(ridership_mean_infoset_train)[-4])
+
+  station_seoul_info %>% 
+    filter(station %in% station_predict) %>% 
+    mutate(mean_count = predict(rpart_fit, new_data)) %>% 
+    mutate(Day = day_choose, Time = time_choose, on_off = on_off_choose) %>% 
+    mutate(Time = as.numeric(Time), on_off = as.factor(on_off)) %>% 
+    dplyr::select(-usz_green, -address) %>% 
+    rbind(ridership_mean_infoset %>% ungroup %>%
+            dplyr::select(-usz_green, -address) %>% 
+            filter(Time == time_choose, Day == day_choose, on_off == on_off_choose) %>% 
+            mutate(Time = as.numeric(Time), on_off = as.factor(on_off)))
+}
+
+predict_count_rpart(day_choose = "Fri", time_choose = "20", on_off_choose = "off")
+```
+
+### 2.3 확률표본추출
+
+* 경로가 제공되지 않는 80개의 지하철역에 대하여 예측된 승하차 수요를 통하여 확률표본추출을 시행함
+
+* generate된 데이터셋을 통하여 경로데이터 추가
+
+```{r}
+on_fri_15 <- predict_count_rpart(day_choose = "Fri", time_choose = "15", on_off_choose = "on")
+off_fri_15 <- predict_count_rpart(day_choose = "Fri", time_choose = "15", on_off_choose = "off")
+
+MC_sampling <- function(input_data, on_off_choose){
+  result_generate <- list()
+  nms_get <- setdiff(station_seoul_info$station, ridership_mean_infoset$station)
+  for(i in 1:length(nms_get)){
+    nrow_i <- input_data %>% filter(station==nms_get[i]) %>%
+      dplyr::select(mean_count) %>% t() %>% as.numeric() %>% round()
+    result_generate[[nms_get[i]]] <- as_tibble(matrix(0, nrow_i, 3))
+    colnames(result_generate[[nms_get[i]]]) <- c("time", on_off_choose, 'generate')
+    result_generate[[nms_get[i]]]$time <- input_data$Time[1]
+    result_generate[[nms_get[i]]][,on_off_choose] <- nms_get[i]
+    tot_except_i <- sum(input_data$mean_count[input_data$station != nms_get[i]] %>% round())
+    generate <- sample(x = input_data$station[input_data$station != nms_get[i]], replace =TRUE, 
+                       size = input_data$mean_count[input_data$station == nms_get[i]] %>% round(), 
+                       prob = input_data$mean_count[input_data$station != nms_get[i]] %>% round()/tot_except_i)
+    result_generate[[nms_get[i]]]$generate <- generate
+  }
+  gen_result <- result_generate[[1]]
+  for(i in 2:length(result_generate)){
+    gen_result <- rbind(gen_result, result_generate[[i]])
+  } 
+  if(on_off_choose=="on"){
+    gen_result <- gen_result %>% rename(depart = on, arrival = generate)
+  }else{
+    gen_result <- gen_result %>% rename(depart = generate, arrival = off)
+  }
+  gen_result %>% mutate(set = paste0(depart, "-", arrival),
+                        day = input_data$Day %>% unique) %>%
+    group_by(time, day, depart, arrival, set) %>% summarise(count=n()) %>% ungroup()
+}
+
+MC_sampling(on_fri_15, "on") 
+```
+
+@@@@ 확률표본 결과 추가하여 구간 수요 합 @@@@
+
+### 2.4 이동경로 수요예측
+  
+강북횡단선이 추가된 최단경로 데이터베이스를 이용하여 18년 4월 한달 간 역별/시간대별 이동경로 수요 파악를 파악한다.
+사용할 데이터는 2018년 4월 한달 동안의 이용객 개별 승하차 데이터이며 총 112,863,737건이 포함되어 있다.
+
+```{r, eval=FALSE}
+setwd("/home/students/kson/")
+subway_04_1 <- fread(file="../subway/OD_1_8_1804_1.csv")
+subway_04_1_handle <- reconstruct_data(subway_04_1, colname_list=c("승차역명", "승차호선명", "하차역명", "하차호선명"))
+#saveRDS(file="data/subway_04_1_handle.RDS", subway_04_1_handle)
+subway_04_1_handle <- readRDS(file="data/subway_04_1_handle.RDS")
+
+subway_04_1_date_on_off_time <- subway_04_1_handle %>% 
+  group_by(운행일자, 승차역명,하차역명,시간대) %>%
+  summarise(count = n())
+
+subway_04_2 <- fread(file="../subway/OD_1_8_1804_2.csv")
+subway_04_2_handle <- reconstruct_data(subway_04_2, colname_list=c("승차역명", "승차호선명", "하차역명", "하차호선명"))
+#saveRDS(file="data/subway_04_2_handle.RDS", subway_04_2_handle)
+subway_04_2_handle <- readRDS(file="data/subway_04_2_handle.RDS")
+
+subway_04_2_date_on_off_time <- subway_04_2_handle %>% group_by(운행일자, 승차역명, 하차역명, 시간대)%>% summarise(count = n())
+
+subway_04_date_on_off_time <- rbind(subway_04_1_date_on_off_time, subway_04_2_date_on_off_time)
+
+#saveRDS(file="data/subway_04_route.RDS", subway_04_date_on_off_time)
+
+subway_04_date_on_off_time %>%ungroup%>% select(승차역명, 하차역명) %>% unique()
+## 57948 x 2
+```
+ 
+#### 2.4.1 subway_04_route
+
+일자별 승차역, 하차역, 시간대를 기준으로 경로의 합계를 계산한다. 이때, 운행일자 기준으로 요일 변수를 추가 생성한다.
+
+```{r, eval=FALSE}
+subway_04_route <- readRDS(file="../data/subway_04_route.RDS")
+# subway_04_route <- readRDS(file="line_G/data/subway_04_route.RDS")
+
+subway_04_route <- ungroup(subway_04_route)
+colnames(subway_04_route) <- iconv(colnames(subway_04_route), "utf8")
+
+#subway_04_route <- subway_04_route %>% 
+#  mutate(set = paste0(승차역명, "-", 하차역명),
+#         set_reverse= paste0(하차역명, "-", 승차역명))
+day <- c(rep(c("일", "월", "화", "수", "목", "금", "토"), 4), "일", "월")
+
+subway_04_route <- data.frame(운행일자 = c(20180401:20180430), 요일 = day) %>% 
+  right_join(subway_04_route)
+
+colnames(subway_04_route) <- c("date", "day", "ride_on", "ride_off", "time", "count")
+
+subway_04_route$time <- ifelse(str_length(subway_04_route$time)==1,
+                               paste0("0", subway_04_route$time),
+                               subway_04_route$time)
+
+#saveRDS(file="../data/subway_04_route.RDS", subway_04_route)
+```
+
+```{r}
+subway_04_route <- readRDS(file="../data/subway_04_route.RDS")
+head(subway_04_route) %>% kable()
+```
+
+#### 2.4.2 요일 단위 승-하차역명 시간대 평균 count계산
+
+subway_04_route_daymean : 요일/시간대별 `출발역-도착역` 경로 평균
+
+```{r, eval=FALSE}
+subway_04_route_daymean <- subway_04_route %>% 
+  group_by(day, ride_on, ride_off, time) %>% 
+  summarise(mean_count = sum(count))
+
+#save(file="../data/subway_04_route_daymean.RData", subway_04_route_daymean)
+```
+
+
+#### 2.4.3 특정 시간대 기준 이동경로수 계산
+
+* 강북횡단선이 반영된 최단경로 DB
+
+* 특정요일, 특정시간대 평균 count 확인
+
+```{r}
+#setwd("D:/workspace/seoulsubway/line_G/code")
+load(file="../data/subway_04_route_daymean.RData")
+```
+
+```{r, echo=TRUE}
+time_choose <- "15"
+day_choose <- "Fri"
+
+on_fri_15 <- predict_count_rpart(day_choose = "Fri", time_choose = "15", on_off_choose = "on")
+MC_sampling(on_fri_15, "on")
+
+summarise_count_db <- function(day_choose, time_choose){
+  route_choose <- as.data.table(subway_04_route_daymean)
+  setkey(route_choose, day)
+  route_choose_frist <- route_choose[day==day_choose,]
+  setkey(route_choose_frist, time)
+  route_choose_second <- route_choose_frist[time==time_choose,]
+  route_choose_second <- route_choose_second %>% 
+    mutate(set = paste0(ride_on, "-", ride_off))
+  unit <- route_choose_second %>% 
+    left_join(shortestpath_db_G) %>%
+    mutate_all(as.character) %>% 
+    ungroup %>% group_by(time, from, to) %>% 
+    summarise(mean = sum(as.numeric(mean_count)))
+  unit
+}
+
+summarise_count_db(day_choose="Fri", time_choose="15")
+```
+
+### 2.3 수요 예측
+
+지하철에 대한 수요라 하면, 우선적으로 역별 승하차 값이 고려될 것이다. 하지만 실제 지하철 운영에 있어서는 시간대별 또는 특정 구간별 지하철을 이용하는 사람의 수를 예측하는 것이 지하철 운행면에서 더 중요할 것이다. 따라서 추가적으로 지하철 이동 간 경유하는 지하철 구간 또한 지하철 수요를 예측한다.
+
+1. 역별 승하차 수
+
+2. 역 이동경유 횟수
+
+`predict_demand_line(day_choose, time_choose, line_choose)` 
+
+  - 요일 : Sun - Sat 중 선택
+
+  - 시간대 : 00,01,02,04-23 중 선택
+
+  - 노선 : 지하철 네트워크 내 22개 노선 중 선택
+  
+```{r, echo=TRUE}
+predict_demand_line <- function(day_choose, time_choose, line_choose) {
+  line_c <- subway_data_G[[line_choose]]$Name
+  pred_on <- predict_count_rpart(day_choose = day_choose, time_choose = time_choose, on_off_choose = "on")
+  pred_off <- predict_count_rpart(day_choose = day_choose, time_choose = time_choose, on_off_choose = "off")
+  result_sum <- summarise_count_db(day_choose = day_choose, time_choose = time_choose)
+  result_onoff <- pred_on %>% rename(pred_on = mean_count, on = on_off) %>% 
+    left_join(pred_off) %>% rename(pred_off = mean_count, off = on_off) %>% 
+    filter(station %in% line_c) %>% 
+    mutate(day = day_choose) %>% 
+    dplyr::select(Day, Time, station, pred_on, pred_off) %>% 
+    rename(day = Day, time = Time)
+  result_path_sum <- result_sum %>% 
+    filter(from %in% line_c, to %in% line_c) %>% 
+    mutate(day = day_choose) %>% 
+    dplyr::select(day, time, from, to, mean)
+  list(on_off = result_onoff, path = result_path_sum)
+}
+
+predict_demand_line(day_choose="Tue", time_choose="17", line_choose="G")
+```
+
+
+
+## 3. 예측값을 이용한 탐색적 자료분석
+
+앞단계에서의 예측값을 이용하여 우선 다음 2개의 데이터셋을 구축하였다.
+
+```{r, eval=FALSE}
+day_choose_list <- c("Sun", "Mon", "Tue", "Wed","Thr", "Fri", "Sat")
+time_choose_list <- str_sort(as.character(unique(ridership_mean_infoset$Time)))
+
+predict_week <- list()
+for(i in seq_along(day_choose_list)){
+  for(j in seq_along(time_choose_list)){
+      predict_week[[paste0(day_choose_list[i], "-", time_choose_list[j])]] <- 
+        tryCatch(predict_demand_line(day_choose=day_choose_list[i], 
+                            time_choose=time_choose_list[j],
+                            line_choose="G"),
+                 error=function(e){list("no result")})
+  }
+}
+
+predict_week_onoff <- predict_week[[1]]$on_off
+predict_week_path <- predict_week[[1]]$path
+for(i in 2:length(predict_week)){
+  predict_week_onoff <- rbind(predict_week_onoff, 
+                              predict_week[[i]]$on_off)
+  predict_week_path <- rbind(predict_week_path, 
+                             predict_week[[i]]$path)
+}
+
+predict_week_onoff
+predict_week_path
+
+#save(file="../data/predict_result.RData", predict_week_onoff, predict_week_path)
+```
+
+predict_week_onoff : Sun 00시부터 Sat 23시까지 랜덤포레스트알고리즘을 이용한 강북횡단선 내 지하철역 승하차 예측값
+
+predict_week_path : Sun 00시부터 Sat 23시까지의 데이터 기반 강북횡단선 내 구간 이동 경로 카운트
+
+```{r}
+load(file="../data/predict_result.RData")
+API_key <- 'AIzaSyCvFJzO8nrvmospv--Mhi9XypO7PvBcZcw'
+register_google(key = API_key)
+```
+
+```{r, echo=TRUE}
+predict_week_onoff
+
+predict_week_path
+```
+
+\newpage
+
+* 요일별 구간 수요 예측 결과 
+
+우선 구간별 계산된 결과는 역별 승/하차 결과값 또한 반영된 결과이므로 이를 고려하여 다음과 같이 1일 노선 수요을 계산한다.
+
+1. 요일별 강북횡단선 내 지하철 역 예상 승하차 이용객수 합
+
+```{r out.width="100%", fig.align="center"}
+onoff_daily <- predict_week_onoff %>% 
+  mutate(day = factor(day, levels=c("Sun","Mon","Tue","Wed","Thr","Fri","Sat"))) %>% 
+  group_by(day, station) %>% 
+  summarise(on_daily = sum(pred_on), 
+            off_daily = sum(pred_off)) 
+onoff_daily_gather <- onoff_daily %>% 
+  gather(key='on_off', value = 'count', on_daily,off_daily)
+
+onoff_daily_gather %>% 
+  filter(on_off=='on_daily') %>% 
+  ggplot(aes(x=day, y= count)) + 
+  geom_bar(position="dodge", stat="identity") +
+  coord_cartesian(ylim=c(0, 25000)) + 
+  facet_wrap(~station, ncol = 4, scales = "free") +
+  ggtitle("predict value of ride on(day)")
+
+onoff_daily_gather %>% 
+  filter(on_off=='off_daily') %>% 
+  ggplot(aes(x=day, y= count)) + 
+  geom_bar(position="dodge", stat="identity") +
+  coord_cartesian(ylim=c(0, 25000)) + 
+  facet_wrap(~station, ncol = 4, scales = "free") + theme_bw() +
+  ggtitle("predict value of ride off(day)")
+```
+길음, 종암사거리, 목동 순으로 역별 승하차 이용객수가 많게 예측되었다. 이는 역 주위정보가 반영된 결과이다.
+
+2. 시간대별 역/요일/승/하차별 승하차 수요예측 결과
+```{r out.width="100%", fig.align="center"}
+predict_week_onoff_gather <- predict_week_onoff %>% 
+  mutate(day=factor(day, levels=c("Sun","Mon","Tue","Wed","Thr","Fri","Sat"))) %>% 
+  gather(on_off, count, pred_on, pred_off)
+
+predict_week_onoff_gather %>% 
+  filter(on_off=='pred_on') %>% 
+  ggplot(aes(x=time, y= count, group=day, col=day)) + 
+  geom_line() + facet_wrap(~station, ncol = 4, scales = "free") +
+  coord_cartesian(ylim=c(0, 4000)) +  theme_bw() +
+  ggtitle("predict value of ride on(time)")
+
+predict_week_onoff_gather %>% 
+  filter(on_off=='pred_off') %>% 
+  ggplot(aes(x=time, y= count, group=day, col=day)) + 
+  geom_line() + facet_wrap(~station, ncol = 4, scales = "free") +
+  coord_cartesian(ylim=c(0, 4000)) +  theme_bw() +
+  ggtitle("predict value of ride off(time)")
+```
+
+3. 요일별 강북횡단선 내 지하철역 승/하차 인원 예측값
+
+평일 강북횡단선을 이용하는 인원은 승차인원과 하차인원의 평균을 고려하면, 약 30만명이 될 것으로 보인다.
+```{r}
+predict_week_onoff %>% 
+  mutate(day = factor(day, levels=c("Sun","Mon","Tue","Wed","Thr","Fri","Sat"))) %>% 
+  group_by(day) %>% 
+  summarise(ride_on = sum(pred_on),
+            ride_off = sum(pred_off),
+            mean = (ride_on+ride_off)/2) %>% 
+  kable()
+```
+
+4. 역 사이 구간별 예상값
+
+* 이용객 개별 승하차데이터를 통하여 계산된 결과로써 각 노선내에서 출발하는 경우가 고려되어지지 않는다. 이는 데이터가 가지는 한계로써 1-8호선에서 출발하고 도착하는 경우만 고려되었기 때문에 아래와 같은 구간 수가 계산된다.  
+
+* 이는 없는 노선이 생겼다는 가정하에서 나온 결과값으로 1-8호선 내 실제 지하철 이용객들의 이동경로를 최단경로알고리즘을 통하여 알아본 후 계산한 결과이다. 데이터가 가지는 한계로 인하여 1-8호선에 속하지 않은 지하철에서 출발 또는 도착된 경로가 반영되지 않았으므로, 정확한 결과라고는 말할 수 없다.
+
+```{r out.width="80%"}
+predict_week_path %>% 
+  mutate(section = paste0(from, "-", to),
+         day = factor(day, levels=c("Sun","Mon","Tue","Wed","Thr","Fri","Sat"))) %>% 
+  filter(day=="Mon", from!=to) %>% 
+  group_by(day, section) %>% 
+  summarise(total = sum(mean)) %>% 
+  arrange(desc(total)) %>% kable()
+```
+
+```{r out.width="80%"}
+predict_week_path_longlat <- subway_data_G[["G"]][,c("Name", "long", "lat")] %>% 
+  rename(from = Name) %>% 
+  right_join(predict_week_path) %>% 
+  rename(from_long = long, from_lat = lat,
+         Name = to) %>%
+  left_join(subway_data_G[["G"]][,c("Name", "long", "lat")]) %>% 
+  rename(to = Name, to_long = long, to_lat = lat) 
+predict_week_path_longlat <- predict_week_path_longlat %>% 
+    mutate(from = factor(from, levels=c("청량리", "홍릉", "월곡", "종암사거리", "길음", "정릉", 
+                                        "국민대", "평창동", "상명대입구", "홍제", "서대문구청", 
+                                        "명지대", "남가좌", "디지털미디어시티", "상암", "등촌",
+                                        "신등촌", "목동사거리", "목동")),
+           to = factor(to, levels=c("청량리", "홍릉", "월곡", "종암사거리", "길음", "정릉", 
+                                    "국민대", "평창동", "상명대입구", "홍제", "서대문구청", 
+                                    "명지대", "남가좌", "디지털미디어시티", "상암", "등촌",
+                                    "신등촌", "목동사거리", "목동")),
+           from_rank = as.numeric(from), to_rank = as.numeric(to))
+
+path_count_G <- function(time_choose, day_choose, up_down){
+  predict_week_path_longlat_key <- predict_week_path_longlat %>% 
+      filter(from_rank>to_rank)
+  if(up_down == "up"){
+    predict_week_path_longlat_key <- predict_week_path_longlat %>% 
+      filter(from_rank<to_rank)
+  }
+  from_set <- predict_week_path_longlat_key %>%
+    mutate(set = paste0(from, "-", to)) %>% 
+    filter(time==time_choose, day == day_choose) %>% 
+    dplyr::select(time, day, set, from, from_long, from_lat, mean)
+  from_set$key <- "from"
+  to_set <- predict_week_path_longlat_key %>%
+    mutate(set = paste0(from, "-", to)) %>% 
+    filter(time==time_choose, day == day_choose) %>% 
+    dplyr::select(time, day, set, to, to_long, to_lat, mean)
+  to_set$key <- "to"  
+  colnames(from_set) <- colnames(to_set) <- c("time", "day", "set", "station",
+                                              "long", "lat", "mean", "key")
+  from_to_path_set <- rbind(from_set, to_set)
+  ggmap(get_map(location = c(126.9534, 37.58047), zoom = 12)) + 
+    geom_path(data=from_to_path_set, aes(x=long, y=lat, col=mean, group=set), size=4) +
+    scale_color_gradient(low="yellow", high="red") +
+    ggtitle(paste("each count of section", "in", time_choose, day_choose, up_down))
+}
+
+```
+
+* 특정 요일/시간대 구간 카운트
+```{r out.width="100%", fig.align="center", echo=TRUE}
+path_count_G(time_choose = "17", day_choose = "Fri", up_down="up")
+
+path_count_G(time_choose = "17", day_choose = "Fri", up_down="down")
+```
+
+```{r out.width="100%", fig.align="center", echo=TRUE}
+path_count_G(time_choose = "07", day_choose = "Mon", up_down="up")
+
+path_count_G(time_choose = "07", day_choose = "Mon", up_down="down")
+```
+
+
+
+  

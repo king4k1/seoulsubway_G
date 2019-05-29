@@ -1,0 +1,889 @@
+---
+title: "Untitled"
+author: "Kwangmin Son"
+date: "2019년 5월 19일"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+## line_G 시뮬레이션용 함수 설정
+```{r}
+library(tidyverse)
+### 보조함수
+
+# 보조함수(checkline)
+
+# 지하철 노선형태로 네트워크를 구축하므로 중도 노선명이 잘못하여 입력되는 경우가 존재함.
+# checkline will check the dataset for select accurate line 
+checkline <- function(check_data, depart_line, arrival_line) {
+  # in multi transfer case, we should consider every possible line 
+  if (FALSE %in% (names(subway_data_G) %in% arrival_line)) {
+    if (isTRUE(str_detect(depart_line, arrival_line) | str_detect(arrival_line, 
+                                                                  depart_line)) == FALSE) {
+      anywrongdat_list <- str_remove(check_data$Transfer, 
+                                     paste0(depart_line, "_", "A")) %>% 
+        str_remove(pattern = paste0(depart_line, "_", "P")) %>% 
+        str_remove(pattern = paste0(depart_line, "_", "B")) 
+      check_data <- check_data[str_which(anywrongdat_list, depart_line), ]
+      anywrongdat_list <- str_remove(check_data$Transfer,
+                                     paste0(arrival_line, "_", "A")) %>% 
+        str_remove(pattern = paste0(arrival_line, "_", "P")) %>% 
+        str_remove(pattern = paste0(arrival_line, "_", "B"))
+      check_data <- check_data[str_which(anywrongdat_list, arrival_line),]
+    }
+  }else{
+    anywrongdat_list <- str_remove(check_data$Transfer, paste0(depart_line, "_", "A")) %>% 
+      str_remove(pattern = paste0(depart_line, "_", "B")) %>% 
+      str_remove(pattern = paste0(depart_line, "_", "P"))
+    check_data <- check_data[str_which(anywrongdat_list, depart_line), ]
+  }
+  return(check_data)
+}
+
+# 보조함수(get_pathinfo)
+
+# 하나의 노선에 대하여 총 역수(total), start(역 1 위치순서), end(역 2 위치순서) 그리고 line(노선)을 입력하면
+# 두 역 사이의 이동역수와 소요시간을 산출한다.
+get_pathinfo <- function(total, start, end, line) {
+  if(is.null(start)|is.null(end)){
+    stop("you can`t get a path from these transfer count number")
+  }
+  Path_Count <- abs(start - end)
+  Path_Time <- sum(subway_data_G[[line]][start:end,]$Time) - subway_data_G[[line]][start,]$Time
+  # (normal case) get index.
+  if (line == "2") {
+    Circulate <- total - abs(start - end)
+    Circulate2 <- abs(start - end)
+    Circulate <- c(Circulate, Circulate2)
+    Circulate_Time <- c(sum(subway_data_G[[line]][c(start:total,1:end),]$Time) - 
+                          subway_data_G[[line]][start, ]$Time,
+                        sum(subway_data_G[[line]][c(end:total,1:start),]$Time) -
+                          subway_data_G[[line]][start,]$Time)
+    Circulate_Time <- Circulate_Time[which.min(Circulate_Time)]
+    Circulate2_Time <- sum(subway_data_G[[line]][start:end,]$Time) - 
+      subway_data_G[[line]][start,]$Time
+    Circulate_Time <- c(Circulate_Time, Circulate2_Time)
+    Path_Count <- Circulate[which.min(Circulate_Time)]
+    Path_Time <- Circulate_Time[which.min(Circulate_Time)]
+    # consider circulate line(line number 2) => use absolute value & total - abs
+  }
+  if (line == "6_A" & start > end) {
+    Path_Count <- 6 + end - start 
+    Path_Time <- sum(subway_data_G[[line]][c(end:6,1:start),]$Time) - 
+      subway_data_G[[line]][start,"Time",]$Time + 3 
+    # 6-A -> 6-A circulate line.
+  }
+  return(data.frame(count = as.numeric(Path_Count), time = as.numeric(Path_Time) %>% round(2)))
+}
+
+# 보조함수(get_transfercriteria)
+
+# 두역에 대한 경로에 대하여 위경도를 기준으로 0.05씩 넓게 패널티를 주어
+# 자른 공간에 속하는 출발역과 도착역이 모두 포함된 환승가능한 역을 산출한다.
+# shortestpath() 함수의 속도를 향상시키기 위함에 본 함수의 목적이 있다.
+
+get_transfercriteria <- function(depart, arrival, penalty=0.05) {
+  station_info <- subway_data_G_DT %>%
+    filter(Name %in% c(depart, arrival)) %>% filter(!duplicated(Name))
+  # get criteria from depart/arrival's longitude&lattitude
+  lat_criteria <- station_info$lat %>% as.numeric
+  lat_lowerbound <- min(lat_criteria) - penalty
+  lat_upperbound <- max(lat_criteria) + penalty
+  long_criteria <- station_info$long %>% as.numeric
+  long_lowerbound <- min(long_criteria) - penalty
+  long_upperbound <- max(long_criteria) + penalty
+  # give penalty for bypass selection
+  transfer_list <- transfer_station_G %>% 
+    filter(lat <= lat_upperbound & lat >= lat_lowerbound) %>% 
+    filter(long <= long_upperbound & long >= long_lowerbound)
+  return(transfer_list)
+}
+
+# 보조함수(get_transferinfo)
+
+# get_transfercriteria에 기준하여 위경도 기준으로 환승지의 후보군을 선택한 후,
+# 범위를 줄여 각 환승 카운트에 대하여 예상 환승지를 선택한다.
+# 만약 두번 환승을 하는 경우라고 한다면, 첫번째 환승예상지역에 대하여 get_transfercriteria로 인해 선정된
+# 지역 내 속하는 첫번째 환승역을 택한 후, 이 첫번째 환승역과 도착역 사이의 잘라진 공간에서의 환승역을 잡아
+# 다음 환승역을 선정하는 방식으로 알고리즘은 이루어진다.
+# 이 함수는 shortestpath()함수의 속도를 향상시키기 위함에 목적이 있다.
+
+get_transferinfo <- function(depart, depart_line, arrival, arrival_line, transfer_count) {
+  # load data
+  transfer_list <- get_transfercriteria(depart, arrival, penalty = 0.05)
+  # set criteria for available transfer station
+  if (transfer_count == 1) {
+    transfer_depart <- transfer_list %>% filter(str_detect(Transfer, fixed(depart_line)))
+    transfer_arrival <- transfer_depart %>% 
+      filter(str_detect(Transfer, fixed(arrival_line))) %>% 
+      checkline(depart_line = depart_line, arrival_line = arrival_line)
+    # find available transfer station(depart, arrival both)
+    transfer_arrival <- transfer_arrival %>% filter(Name %in% subway_data_G[[arrival_line]]$Name)
+  }
+  if (transfer_count == 2) {
+    transfer_arrival <- list()
+    transfer_middle <- transfer_list %>% 
+      filter(str_detect(Transfer, fixed(depart_line))) %>% 
+      checkline(depart_line = depart_line, arrival_line = names(subway_data_G))
+    # set available transfer station for waypoint.(== first transfer station)
+    transfer_middle_list_sub <- str_remove(transfer_middle$Transfer, fixed(depart_line))
+    for (i in 1:nrow(transfer_middle)) {
+      transfer_middle_list <- unlist(str_split(transfer_middle_list_sub[i], pattern = fixed("|")))    
+      index <- which(transfer_middle_list=="")
+      if(length(index)!=0){
+        transfer_middle_list <- transfer_middle_list[-index]
+      }
+      for (j in seq_along(transfer_middle_list)) {
+        transfer_long <- get_transfercriteria(transfer_middle$Name[i], arrival, penalty = 0.075)
+        # set criteria for available transfer station
+        transfer_middle_get <- transfer_long %>% 
+          filter(str_detect(Transfer, transfer_middle_list[j])) %>% 
+          filter(str_detect(Transfer, fixed(arrival_line)))
+        if(nrow(transfer_middle_get)!=0){
+          transfer_middle_get <- transfer_middle_get %>% 
+            filter(Name %in% subway_data_G[[transfer_middle_list[j]]]$Name) %>%
+            filter(Name %in% subway_data_G[[arrival_line]]$Name) %>% 
+            checkline(depart_line = transfer_middle_list[j], arrival_line = arrival_line)
+        } 
+        # use checkline for erro selection.
+        for (k in 1:nrow(transfer_middle_get)) {
+          transfer_arrival[[paste0(i, "-", j, "-", k)]] <- 
+            list(first = transfer_middle[i, ], second = transfer_middle_get[k, ])
+        }
+      }
+    }
+    cut_na <- cut_dup <- c()
+    for (k in seq_along(transfer_arrival)) {
+      cut_na[k] <- is.na(transfer_arrival[[k]]$second[1,1])
+      cut_dup[k] <- isTRUE(transfer_arrival[[k]]$first[1,1] == transfer_arrival[[k]]$second[1,1])
+    }
+    # if second transfer station is null(no result) ==> remove one
+    cut_list <- names(transfer_arrival)[which(cut_na)]
+    cut_dup <- names(transfer_arrival)[which(cut_dup)]
+    for (l in seq_along(cut_list)) {
+      transfer_arrival[[cut_list[l]]] <- NULL
+    }
+    for (l in seq_along(cut_dup)) {
+      transfer_arrival[[cut_dup[l]]] <- NULL
+    }
+  }
+  if (transfer_count == 3) {
+    transfer_arrival <- list()
+    transfer_middle_first <- transfer_list %>% 
+      filter(str_detect(Transfer, fixed(depart_line))) %>% 
+      checkline(depart_line = depart_line, arrival_line = names(subway_data_G))
+    transfer_middle_list_sub <- str_remove(transfer_middle_first$Transfer, fixed(depart_line))
+    for (i in 1:nrow(transfer_middle_first)) {
+      transfer_middle_list <- str_split(transfer_middle_list_sub[i],
+                                        pattern = fixed("|")) %>% unlist()  
+      index <- which(transfer_middle_list=="")
+      if(length(index)!=0){
+        transfer_middle_list <- transfer_middle_list[-index]
+      }
+      for (j in seq_along(transfer_middle_list)) {
+        transfer_long <- get_transfercriteria(transfer_middle_first$Name[i],
+                                              arrival, penalty = 0.075)
+        transfer_middle_second <- transfer_long %>% 
+          filter(str_detect(Transfer, transfer_middle_list[j])) %>% 
+          checkline(depart_line = transfer_middle_list[j], arrival_line = names(subway_data_G))
+        for (j2 in 1:nrow(transfer_middle_second)) {
+          transfer_middle2_list <- unlist(str_split(transfer_middle_second$Transfer[j2], pattern = fixed("|")))    
+          index <- which(transfer_middle2_list=="")
+          if(length(index)!=0){
+            transfer_middle2_list <- transfer_middle2_list[-index]
+          }
+          for (k in seq_along(transfer_middle2_list)) {
+            transfer_long <- get_transfercriteria(transfer_middle_second$Name[j2], arrival, penalty = 0.075)
+            # set criteria wider for available transfer station(branch line)
+            transfer_middle_get <- transfer_long %>%
+              filter(str_detect(Transfer, transfer_middle2_list[j])) %>%
+              filter(str_detect(Transfer, fixed(arrival_line)))
+            if(nrow(transfer_middle_get)!=0){
+              transfer_middle_get <- transfer_middle_get %>% 
+                filter(Name %in% subway_data_G[[transfer_middle2_list[j]]]$Name) %>% 
+                filter(Name %in% subway_data_G[[arrival_line]]$Name) %>% 
+                checkline(depart_line = transfer_middle2_list[k], arrival_line = arrival_line)
+            }
+            for (k2 in 1:nrow(transfer_middle_get)) {
+              transfer_arrival[[paste0(i, "-", j, "-", j2, "-", 
+                                      k, "-", k2)]] <- list(first = transfer_middle_first[i, ],
+                                                            second = transfer_middle_second[j2, ],
+                                                            third = transfer_middle_get[k2, ])
+            }
+          }
+        }
+      }
+    }
+    cut_na <- cut_dup <- cut_dup2 <- c()
+    for (k in seq_along(transfer_arrival)) {
+      cut_na[k] <- is.na(transfer_arrival[[k]]$third[1, 1])
+      cut_dup[k] <- isTRUE(transfer_arrival[[k]]$first[1, 1] == transfer_arrival[[k]]$second[1, 1])
+      cut_dup2[k] <- isTRUE(transfer_arrival[[k]]$second[1, 1] == transfer_arrival[[k]]$third[1, 1])
+    }
+    # if second transfer station is null(no result) ==> remove one
+    cut_list <- names(transfer_arrival)[which(cut_na)]
+    cut_dup <- names(transfer_arrival)[which(cut_dup)]
+    cut_dup2 <- names(transfer_arrival)[which(cut_dup2)]
+    for (l in seq_along(cut_list)) {
+      transfer_arrival[[cut_list[l]]] <- NULL
+    }
+    for (l in seq_along(cut_dup)) {
+      transfer_arrival[[cut_dup[l]]] <- NULL
+    }
+    for (l in seq_along(cut_dup2)) {
+      transfer_arrival[[cut_dup2[l]]] <- NULL
+    }
+  }
+  return(transfer_arrival)
+}
+
+# 보조함수(get_pathresult)
+
+# 최단거리에 따른 세부 이동경로에 대한 결과를 산출하는 함수
+# 결과 포맷을 일정하게 함수형태로 산출하기 위함
+
+get_pathresult <- function(shortestpath_result) {
+  Set <- list(Info = shortestpath_result$Info,
+              Count = shortestpath_result$Total['Count'] %>% as.numeric %>% round(2),
+              Time = shortestpath_result$Total['Time'] %>% as.numeric %>% round(2))
+  if (nrow(Set$Info) == 1) {
+    Start_Ind_0 <- which(subway_data_G[[as.character(Set$Info$Line[1])]]$Name == 
+                           as.character(Set$Info$Depart[1]))
+    End_Ind_0 <- which(subway_data_G[[as.character(Set$Info$Line[1])]]$Name == 
+                         as.character(Set$Info$Arrive[1]))
+    Total_Depart_Raw <- nrow(subway_data_G[[as.character(Set$Info$Line[1])]])
+    Set$Path <- subway_data_G[[as.character(Set$Info$Line[1])]][Start_Ind_0:End_Ind_0, ]
+    if (isTRUE(Set$Info$Line[1] == 2) & 
+        isTRUE(Set$Info$Count[1] == (Total_Depart_Raw - Start_Ind_0 + End_Ind_0))) {
+      Set$Path <- subway_data_G[["2"]][c(Start_Ind_0:Total_Depart_Raw, 1:End_Ind_0), ]
+    } else if (isTRUE(Set$Info$Line[1] == 2) & 
+               isTRUE(Set$Info$Count[1] == (Total_Depart_Raw - End_Ind_0 + Start_Ind_0))) {
+      Set$Path <- subway_data_G[["2"]][c(Start_Ind_0:1, Total_Depart_Raw:End_Ind_0), ]
+    }
+    if (isTRUE(Set$Info$Line[1] == "6_A") & Start_Ind_0 > End_Ind_0) {
+      Set$Path <- subway_data_G[["6_A"]][c(Start_Ind_0 :6, 1:End_Ind_0), ]
+    }
+  }
+  if (nrow(Set$Info) == 2) {
+    Start_Ind_1 <- which(subway_data_G[[as.character(Set$Info$Line[1])]]$Name == 
+                           as.character(Set$Info$Depart[1]))
+    End_Ind_1 <- which(subway_data_G[[as.character(Set$Info$Line[1])]]$Name == 
+                         as.character(Set$Info$Arrive[1]))
+    Start_Ind2_1 <- which(subway_data_G[[as.character(Set$Info$Line[2])]]$Name == 
+                            as.character(Set$Info$Depart[2]))
+    End_Ind2_1 <- which(subway_data_G[[as.character(Set$Info$Line[2])]]$Name == 
+                          as.character(Set$Info$Arrive[2]))
+    Total_Depart_Raw <- nrow(subway_data_G[[as.character(Set$Info$Line[1])]])
+    Total_Transfer_Raw <- nrow(subway_data_G[[as.character(Set$Info$Line[2])]])
+    Set$Path1 <- subway_data_G[[as.character(Set$Info$Line[1])]][Start_Ind_1:End_Ind_1, ]
+    Set$Path2 <- subway_data_G[[as.character(Set$Info$Line[2])]][Start_Ind2_1:End_Ind2_1, ]
+    # default setting for normal case;
+    if (isTRUE(as.character(Set$Info$Line[1]) ==
+               2) & isTRUE(Set$Info$Count[1] == (Total_Depart_Raw - Start_Ind_1 + End_Ind_1))) {
+      Set$Path1 <- subway_data_G[["2"]][c(Start_Ind_1:Total_Depart_Raw, 1:End_Ind_1), ]
+    } else if (isTRUE(as.character(Set$Info$Line[1]) ==
+                      2) & isTRUE(Set$Info$Count[1] == (Total_Depart_Raw - End_Ind_1 + Start_Ind_1))) {
+      Set$Path1 <- subway_data_G[["2"]][c(Start_Ind_1:1, Total_Depart_Raw:End_Ind_1), ]
+    }
+    if (isTRUE(as.character(Set$Info$Line[2]) == 
+               2) & isTRUE(Set$Info$Count[2] == (Total_Transfer_Raw - Start_Ind2_1 + End_Ind2_1))) {
+      Set$Path2 <- subway_data_G[["2"]][c(Start_Ind2_1:Total_Transfer_Raw, 1:End_Ind2_1), ]
+    } else if (isTRUE(as.character(Set$Info$Line[2]) == 
+                      2) & isTRUE(Set$Info$Count[2] == (Total_Transfer_Raw - End_Ind2_1 + Start_Ind2_1))) {
+      Set$Path2 <- subway_data_G[["2"]][c(Start_Ind2_1:1, Total_Transfer_Raw:End_Ind2_1), ]
+    }
+    if (isTRUE(as.character(Set$Info$Line[1]) == "6_A") & Start_Ind_1 >= End_Ind_1) {
+      Set$Path1 <- subway_data_G[["6_A"]][c(Start_Ind_1:6, 1:End_Ind_1), ]
+    }
+    if (isTRUE(as.character(Set$Info$Line[2]) == "6_A") & Start_Ind_1 >= End_Ind_1) {
+      Set$Path2 <- subway_data_G[["6_A"]][c(Start_Ind2_1:6, 1:End_Ind2_1), ]
+    }
+  }
+  if (nrow(Set$Info) == 3) {
+    Start_Ind_2 <- which(subway_data_G[[as.character(Set$Info$Line[1])]]$Name == 
+                           as.character(Set$Info$Depart[1]))
+    End_Ind_2 <- which(subway_data_G[[as.character(Set$Info$Line[1])]]$Name == 
+                         as.character(Set$Info$Arrive[1]))
+    Start_Ind2_2 <- which(subway_data_G[[as.character(Set$Info$Line[2])]]$Name == 
+                            as.character(Set$Info$Depart[2]))
+    End_Ind2_2 <- which(subway_data_G[[as.character(Set$Info$Line[2])]]$Name == 
+                          as.character(Set$Info$Arrive[2]))
+    Start_Ind3_2 <- which(subway_data_G[[as.character(Set$Info$Line[3])]]$Name == 
+                            as.character(Set$Info$Depart[3]))
+    End_Ind3_2 <- which(subway_data_G[[as.character(Set$Info$Line[3])]]$Name == 
+                          as.character(Set$Info$Arrive[3]))
+    Total_Depart_Raw <- nrow(subway_data_G[[as.character(Set$Info$Line[1])]])
+    Total_Transfer_Raw <- nrow(subway_data_G[[as.character(Set$Info$Line[2])]])
+    Total_End_Raw <- nrow(subway_data_G[[as.character(Set$Info$Line[3])]])
+    Set$Path1 <- subway_data_G[[as.character(Set$Info$Line[1])]][Start_Ind_2:End_Ind_2, ]
+    Set$Path2 <- subway_data_G[[as.character(Set$Info$Line[2])]][Start_Ind2_2:End_Ind2_2, ]
+    Set$Path3 <- subway_data_G[[as.character(Set$Info$Line[3])]][Start_Ind3_2:End_Ind3_2, ]
+    if (isTRUE(as.character(Set$Info$Line[1]) ==
+               2) & isTRUE(Set$Info$Count[1] == (Total_Depart_Raw - Start_Ind_2 + End_Ind_2))) {
+      Set$Path1 <- subway_data_G[["2"]][c(Start_Ind_2:Total_Depart_Raw, 
+                                        1:End_Ind_2), ]
+    } else if (isTRUE(Set$Info$Line[1] == 
+                      2) & isTRUE(Set$Info$Count[1] == (Total_Depart_Raw - End_Ind_2 + Start_Ind_2))) {
+      Set$Path1 <- subway_data_G[["2"]][c(Start_Ind_2:1,Total_Depart_Raw:End_Ind_2), ]
+    }
+    if (isTRUE(Set$Info$Line[2] == 
+               2) & isTRUE(Set$Info$Count[2] == (Total_Transfer_Raw - Start_Ind2_2 + End_Ind2_2))) {
+      Set$Path2 <- subway_data_G[["2"]][c(Start_Ind2_2:Total_Transfer_Raw, 1:End_Ind2_2), ]
+    } else if (isTRUE(Set$Info$Line[2] == 
+                      2) & isTRUE(Set$Info$Count[2] == (Total_Transfer_Raw - End_Ind2_2 + Start_Ind2_2))) {
+      Set$Path2 <- subway_data_G[["2"]][c(Start_Ind2_2:1, Total_Transfer_Raw:End_Ind2_2), ]
+    }
+    if (isTRUE(Set$Info$Line[3] == 2) & isTRUE(Set$Info$Count[3] == 
+                                                  (Total_End_Raw - Start_Ind3_2 + End_Ind3_2))) {
+      Set$Path3 <- subway_data_G[["2"]][c(Start_Ind3_2:Total_End_Raw, 
+                                        1:End_Ind3_2), ]
+    } else if (isTRUE(Set$Info$Line[3] == 
+                      2) & isTRUE(Set$Info$Count[3] == (Total_End_Raw - End_Ind3_2 + Start_Ind3_2))) {
+      Set$Path3 <- subway_data_G[["2"]][c(Start_Ind3_2:1, Total_End_Raw:End_Ind3_2), ]
+    }
+    if (isTRUE(Set$Info$Line[1] == "6_A") & Start_Ind_2 > End_Ind_2) {
+      Set$Path1 <- subway_data_G[["6_A"]][c(Start_Ind_2:6, 1:End_Ind_2), ]
+    }
+    if (isTRUE(Set$Info$Line[2] == "6_A") & Start_Ind2_2 > End_Ind2_2) {
+      Set$Path2 <- subway_data_G[["6_A"]][c(Start_Ind2_2:6, 1:End_Ind2_2), ]
+    }
+    if (isTRUE(Set$Info$Line[3] == "6_A") & Start_Ind3_2 > End_Ind3_2) {
+      Set$Path3 <- subway_data_G[["6_A"]][c(Start_Ind3_2:6, 1:End_Ind3_2), ]
+    }
+  }
+  if (nrow(Set$Info) == 4) {
+    Start_Ind_3 <- which(subway_data_G[[as.character(Set$Info$Line[1])]]$Name == 
+                           as.character(Set$Info$Depart[1]))
+    End_Ind_3 <- which(subway_data_G[[as.character(Set$Info$Line[1])]]$Name == 
+                         as.character(Set$Info$Arrive[1]))
+    Start_Ind2_3 <- which(subway_data_G[[as.character(Set$Info$Line[2])]]$Name == 
+                            as.character(Set$Info$Depart[2]))
+    End_Ind2_3 <- which(subway_data_G[[as.character(Set$Info$Line[2])]]$Name == 
+                          as.character(Set$Info$Arrive[2]))
+    Start_Ind3_3 <- which(subway_data_G[[as.character(Set$Info$Line[3])]]$Name == 
+                            as.character(Set$Info$Depart[3]))
+    End_Ind3_3 <- which(subway_data_G[[as.character(Set$Info$Line[3])]]$Name == 
+                          as.character(Set$Info$Arrive[3]))
+    Start_Ind4_3 <- which(subway_data_G[[as.character(Set$Info$Line[4])]]$Name == 
+                            as.character(Set$Info$Depart[4]))
+    End_Ind4_3 <- which(subway_data_G[[as.character(Set$Info$Line[4])]]$Name == 
+                          as.character(Set$Info$Arrive[4]))
+    Total_Depart_Raw <- nrow(subway_data_G[[as.character(Set$Info$Line[1])]])
+    Total_Transfer1_Raw <- nrow(subway_data_G[[as.character(Set$Info$Line[2])]])
+    Total_Transfer2_Raw <- nrow(subway_data_G[[as.character(Set$Info$Line[3])]])
+    Total_End_Raw <- nrow(subway_data_G[[as.character(Set$Info$Line[4])]])
+    Set$Path1 <- subway_data_G[[as.character(Set$Info$Line[1])]][Start_Ind_3:End_Ind_3, ]
+    Set$Path2 <- subway_data_G[[as.character(Set$Info$Line[2])]][Start_Ind2_3:End_Ind2_3, ]
+    Set$Path3 <- subway_data_G[[as.character(Set$Info$Line[3])]][Start_Ind3_3:End_Ind3_3, ]
+    Set$Path4 <- subway_data_G[[as.character(Set$Info$Line[4])]][Start_Ind4_3:End_Ind4_3, ]
+    if (isTRUE(Set$Info$Line[1] == 
+               2) & isTRUE(Set$Info$Line[1] == (Total_Depart_Raw - Start_Ind_3 + End_Ind_3))) {
+      Set$Path1 <- subway_data_G[["2"]][c(Start_Ind_3:Total_Depart_Raw, 1:End_Ind_3), ]
+    } else if (isTRUE(Set$Info$Line[1] == 
+                      2) & isTRUE(Set$Info$Line[1] == (Total_Depart_Raw - End_Ind_3 + Start_Ind_3))) {
+      Set$Path1 <- subway_data_G[["2"]][c(Start_Ind_3:1, Total_Depart_Raw:End_Ind_3), ]
+    }
+    if (isTRUE(Set$Info$Line[2] == 
+               2) & isTRUE(Set$Info$Count[2] == (Total_Transfer1_Raw - Start_Ind2_3 + End_Ind2_3))) {
+      Set$Path2 <- subway_data_G[["2"]][c(Start_Ind2_3:Total_Transfer1_Raw, 1:End_Ind2_3), ]
+    } else if (isTRUE(Set$Info$Line[2] == 
+                      2) & isTRUE(Set$Info$Count[2] == (Total_Transfer1_Raw - End_Ind2_3 + Start_Ind2_3))) {
+      Set$Path2 <- subway_data_G[["2"]][c(Start_Ind2_3:1, Total_Transfer1_Raw:End_Ind2_3), ]
+    }
+    if (isTRUE(Set$Info$Line[3] == 
+               2) & isTRUE(Set$Info$Count[3] == (Total_Transfer2_Raw - Start_Ind3_3 + End_Ind3_3))) {
+      Set$Path3 <- subway_data_G[["2"]][c(Start_Ind3_3:Total_Transfer2_Raw, 1:End_Ind3_3), ]
+    } else if (isTRUE(Set$Info$Line[3] == 
+                      2) & isTRUE(Set$Info$Count[3] == (Total_Transfer2_Raw - End_Ind3_3 + Start_Ind3_3))) {
+      Set$Path3 <- subway_data_G[["2"]][c(Start_Ind3_3:1, Total_Transfer2_Raw:End_Ind3_3), ]
+    }
+    if (isTRUE(Set$Info$Line[3] == 
+               2) & isTRUE(Set$Info$Count[4] == (Total_End_Raw - Start_Ind4_3 + End_Ind4_3))) {
+      Set$Path4 <- subway_data_G[["2"]][c(Start_Ind3_3:Total_End_Raw, 1:End_Ind4_3), ]
+    } else if (isTRUE(Set$Info$Line[4] == 
+                      2) & isTRUE(Set$Info$Count[4] == (Total_End_Raw - End_Ind4_3 + Start_Ind4_3))) {
+      Set$Path4 <- subway_data_G[["2"]][c(Start_Ind4_3:1,Total_End_Raw:End_Ind4_3), ]
+    }
+    if (isTRUE(Set$Info$Line[1] == "6_A") & Start_Ind_3 > End_Ind_3) {
+      Set$Path1 <- subway_data_G[["6_A"]][c(Start_Ind_3:6, 1:End_Ind_3), ]
+    }
+    if (isTRUE(Set$Info$Line[2] == "6_A") & Start_Ind2_3 > End_Ind2_3) {
+      Set$Path2 <- subway_data_G[["6_A"]][c(Start_Ind2_3:6, 1:End_Ind2_3), ]
+    }
+    if (isTRUE(Set$Info$Line[3] == "6_A") & Start_Ind3_3 > End_Ind3_3) {
+      Set$Path3 <- subway_data_G[["6_A"]][c(Start_Ind3_3:6, 1:End_Ind3_3), ]
+    }
+    if (isTRUE(Set$Info$Line[4] == "6_A") & Start_Ind4_3 > End_Ind4_3) {
+      Set$Path4 <- subway_data_G[["6_A"]][c(Start_Ind4_3:6, 1:End_Ind4_3), ]
+    }
+  }
+  return(Set)
+}
+
+
+# shortestpath_0
+## it will works when depart_line == arrival_line
+shortestpath_0 <- function(depart, depart_line, arrival, arrival_line) {
+  Start_Ind_0 <- which(subway_data_G[[depart_line]]$Name == depart)
+  End_Ind_0 <- which(subway_data_G[[depart_line]]$Name == arrival)
+  Total_Depart_Raw <- nrow(subway_data_G[[depart_line]])
+  if (depart_line == arrival_line) {
+    Path_Info <- get_pathinfo(total = Total_Depart_Raw, start = Start_Ind_0, 
+                              end = End_Ind_0, line = depart_line)
+    Path_Count <- as.numeric(Path_Info["count"])
+    Path_Time <- as.numeric(Path_Info["time"])
+    Transfer_0 <- list(Info = data.frame(Depart = depart, Line = depart_line, Count = Path_Count, 
+                                         Time = Path_Time, Arrive = arrival),
+                       Total = c(Count = Path_Count, Time = Path_Time))
+  }
+  Set <- get_pathresult(Transfer_0)
+  return(Set)
+}
+
+# shortestpath_1
+## when using transfer 1 time.
+shortestpath_1 <- function(depart, depart_line, arrival, arrival_line) {
+  Transfer_List <- get_transferinfo(depart, depart_line,
+                                    arrival, arrival_line, 
+                                    transfer_count = 1)
+  if(nrow(Transfer_List)==0){
+    stop("you can`t get a path from these transfer count number 1.
+         also you should consider branch line '2_A', '2_B', '5_A', '6_A', 'K_A'")
+  }
+  # get available transfer station list
+  Total_Depart_Raw <- nrow(subway_data_G[[depart_line]])
+  Total_Transfer_Raw <- nrow(subway_data_G[[arrival_line]])
+  Transfer_1 <- list()
+  # first setting for loops
+  Start_Ind_1 <- which(subway_data_G[[depart_line]]$Name == depart)
+  End_Ind_1 <- c()
+  for (i in 1:nrow(Transfer_List)) {
+    End_Ind_1[i] <- which(subway_data_G[[depart_line]]$Name == Transfer_List$Name[i])
+    Path1_Info <- get_pathinfo(total = Total_Depart_Raw, start = Start_Ind_1, 
+                               end = End_Ind_1[i], line = depart_line)
+    # get time / count information from get_pathinfo() and manufacture one.
+    Start_Ind2_1 <- which(subway_data_G[[arrival_line]]$Name == Transfer_List[i,]$Name)
+    End_Ind2_1 <- which(subway_data_G[[arrival_line]]$Name == arrival)
+    Path2_Info <- get_pathinfo(total = Total_Transfer_Raw, start = Start_Ind2_1, 
+                               end = End_Ind2_1, line = arrival_line)
+    # get transfer time from transfer_info data set; no result can get
+    # 2.35(average spend time for transfer)
+    Transfer_Time <- transfer_info %>% 
+      filter(Transfer_Name == Transfer_List$Name[i]) %>% 
+      filter(Transfer_Line == depart_line & Transfer_Line2 == arrival_line)
+    if (nrow(Transfer_Time) >= 1) {
+      Transfer_Time <- as.numeric(Transfer_Time$Transfer_Time)
+    } else {
+      Transfer_Time <- 2.35
+    }
+    Transfer_1[[i]] <- list(Info = data.frame(Depart = c(depart, Transfer_List[i,]$Name),
+                                              Line = c(depart_line, arrival_line),
+                                              Count = c(Path1_Info$count, Path2_Info$count),
+                                              Time = c(Path1_Info$time, Path2_Info$time),
+                                              Arrive = c(Transfer_List[i,]$Name, arrival)), 
+                            Total = c(Count = Path1_Info$count + Path2_Info$count,
+                                      Time = Path1_Info$time + Path2_Info$time + Transfer_Time + 3))
+  }
+  Transfer_1_Count_Time <- c()
+  for (i in seq_along(Transfer_1)) {
+    Transfer_1_Count_Time[i] <- as.numeric(Transfer_1[[i]]$Total["Time"])
+  }
+  Path_1_Shortest <- which.min(Transfer_1_Count_Time)
+  Transfer_1 <- Transfer_1[[Path_1_Shortest]]
+  # get shortestpath(time depend)
+  Set <- get_pathresult(Transfer_1)
+  # get_route / consider line number 2 & 6_A for circulate system.
+  return(Set)
+}
+
+# shortestpath_2
+## when using transfer 2 time.
+shortestpath_2 <- function(depart, depart_line, arrival, arrival_line) {
+  # load data
+  Total_Depart_Raw <- nrow(subway_data_G[[depart_line]])
+  Total_End_Raw <- nrow(subway_data_G[[arrival_line]])
+  Start_Ind_2 <- which(subway_data_G[[depart_line]]$Name == depart)
+  Transfer_List <- get_transferinfo(depart, depart_line,
+                                    arrival, arrival_line, 
+                                    transfer_count = 2)
+  # get available transfer station list these results are list format and
+  # include first/second transfer station.
+  if(length(Transfer_List)==0){
+    stop("you can`t get a path from these transfer count number 2.
+         also you should consider branch line '2-A', '2-B', '5-A', '6-A', 'K2'")
+  }
+  Transfer_2 <- list()
+  for (i in seq_along(Transfer_List)) {
+    Transfer_First <- Transfer_List[[i]]$first
+    Transfer_Second <- Transfer_List[[i]]$second
+    End_Ind_2 <- which(subway_data_G[[depart_line]]$Name == Transfer_First$Name)
+    Transfer_First_Ind <- str_split(Transfer_First$Transfe, pattern = paste0("[", "$", "|", "]")) %>% unlist
+    Transfer_Second_Ind <- str_split(Transfer_Second$Transfe, pattern = paste0("[", "$", "|", "]")) %>% unlist
+    # process variable for get transfer line
+    Transfer_First_Line <- Transfer_Second_Ind[which(Transfer_Second_Ind%in%Transfer_First_Ind)][1]
+    if(!(is.na(Transfer_First_Line))){
+      Total_Transfer_Raw <- nrow(subway_data_G[[Transfer_First_Line]])
+      Start_Ind2_2 <- which(subway_data_G[[Transfer_First_Line]]$Name == Transfer_First$Name)
+      End_Ind2_2 <- which(subway_data_G[[Transfer_First_Line]]$Name == Transfer_Second$Name)
+      Start_Ind3_2 <- which(subway_data_G[[arrival_line]]$Name == Transfer_Second$Name)
+      End_Ind3_2 <- which(subway_data_G[[arrival_line]]$Name == arrival)
+      # get information about each path way
+      Path1_Info <- get_pathinfo(total = Total_Depart_Raw, start = Start_Ind_2, 
+                                 end = End_Ind_2, line = depart_line)
+      Path2_Info <- get_pathinfo(total = Total_Transfer_Raw, start = Start_Ind2_2, 
+                                 end = End_Ind2_2, line = Transfer_First_Line)
+      Path3_Info <- get_pathinfo(total = Total_End_Raw, start = Start_Ind3_2, 
+                                 end = End_Ind3_2, line = arrival_line)
+      # get transfer time each / ex) depart -> transfer
+      Transfer_Time1 <- transfer_info %>% 
+        filter(Transfer_Name == Transfer_First$Name) %>% 
+        filter(Transfer_Line == depart_line & Transfer_Line2 == Transfer_First_Line)
+      Transfer_Time2 <- transfer_info %>% 
+        filter(Transfer_Name == Transfer_Second$Name) %>% 
+        filter(Transfer_Line == Transfer_First_Line & Transfer_Line2 == arrival_line)
+      if (nrow(Transfer_Time1) >= 1) {
+        Transfer_Time1 <- as.numeric(Transfer_Time1$Transfer_Time)
+      } else {
+        Transfer_Time1 <- 2.35
+      }
+      # if no results about transfer_info data -> print 2.35(citation)
+      if (nrow(Transfer_Time2) >= 1) {
+        Transfer_Time2 <- as.numeric(Transfer_Time2$Transfer_Time)
+      } else {
+        Transfer_Time2 <- 2.35
+      }
+      Transfer_2[[i]] <- list(Info = data.frame(Depart = c(depart, Transfer_First$Name, Transfer_Second$Name),
+                                                Line = c(depart_line, Transfer_First_Line, arrival_line), 
+                                                Count = c(Path1_Info$count, Path2_Info$count, Path3_Info$count), 
+                                                Time = c(Path1_Info$time, Path2_Info$time, Path3_Info$time),
+                                                Arrive = c(Transfer_First$Name, Transfer_Second$Name, arrival)),
+                              Total = c(Count = sum(Path1_Info$count + Path2_Info$count + Path3_Info$count), 
+                                        Time = sum(Path1_Info$time + Path2_Info$time + Path3_Info$time) +
+                                          Transfer_Time1 + Transfer_Time2 + 6))
+    }else{
+      Transfer_3[[i]] <- list(Total = c(Time = 300))
+    }
+  }
+  Transfer_2_Count_Time <- c()
+  for (i in seq_along(Transfer_2)) {
+    Transfer_2_Count_Time[i] <- as.numeric(Transfer_2[[i]]$Total["Time"])
+  }
+  Path_2_Shortest <- which.min(Transfer_2_Count_Time)
+  # select shortest path(time depend)
+  Transfer_2 <- Transfer_2[[Path_2_Shortest]]
+  Set <- get_pathresult(Transfer_2)
+  # get_route / consider line number 2 & 6-A for circulate system.
+  return(Set)
+}
+
+# shortestpath_3(depart, depart_line, arrival, arrival_line)
+## when using transfer 3 time.
+shortestpath_3 <- function(depart, depart_line, arrival, arrival_line) {
+  # load data
+  Total_Depart_Raw <- nrow(subway_data_G[[depart_line]])
+  Total_End_raw <- nrow(subway_data_G[[arrival_line]])
+  Start_Ind_3 <- which(subway_data_G[[depart_line]]$Name == depart)
+  Transfer_List <- get_transferinfo(depart, depart_line, arrival, arrival_line, 
+                                    transfer_count = 3)
+  # get available transfer station list these results are list format and
+  # get first/second/third transfer station.
+  if(length(Transfer_List)==0){
+    stop("you can`t get a path from these transfer count number 3.
+         also you should consider branch line '2_A', '2_B', '5_A', '6_A', 'K_A'")
+  }
+  Transfer_3 <- list()
+  for (i in seq_along(Transfer_List)) {
+    Transfer_First <- Transfer_List[[i]]$first
+    Transfer_Second <- Transfer_List[[i]]$second
+    Transfer_Third <- Transfer_List[[i]]$third
+    End_Ind_3 <- which(subway_data_G[[depart_line]]$Name == Transfer_First$Name)
+    Transfer_First_Ind <- str_split(Transfer_First$Transfe, pattern = paste0("[", "$", "|", "]")) %>% unlist
+    Transfer_Second_Ind <- str_split(Transfer_Second$Transfe, pattern = paste0("[", "$", "|", "]")) %>% unlist
+    Transfer_Third_Ind <- str_split(Transfer_Third$Transfe, pattern = paste0("[", "$", "|", "]")) %>% unlist
+    # process variable for get transfer line
+    Transfer_First_Line <- Transfer_Second_Ind[which(Transfer_Second_Ind%in%Transfer_First_Ind)][1]
+    Transfer_Second_Line <- Transfer_Third_Ind[which(Transfer_Third_Ind%in%Transfer_Second_Ind)][1]
+    if(!(is.na(Transfer_First_Line)) & !(is.na(Transfer_Second_Line))){
+      Total_Transfer1_Raw <- nrow(subway_data_G[[Transfer_First_Line]])
+      Total_Transfer2_Raw <- nrow(subway_data_G[[Transfer_Second_Line]])
+      Start_Ind2_3 <- which(subway_data_G[[Transfer_First_Line]]$Name == Transfer_First$Name)
+      End_Ind2_3 <- which(subway_data_G[[Transfer_First_Line]]$Name == Transfer_Second$Name)
+      Start_Ind3_3 <- which(subway_data_G[[Transfer_Second_Line]]$Name == Transfer_Second$Name)
+      End_Ind3_3 <- which(subway_data_G[[Transfer_Second_Line]]$Name == Transfer_Third$Name)
+      Start_Ind4_3 <- which(subway_data_G[[arrival_line]]$Name == Transfer_Third$Name)
+      End_Ind4_3 <- which(subway_data_G[[arrival_line]]$Name == arrival)
+      # get information about each path way
+      Path1_Info <- get_pathinfo(total = Total_Depart_Raw, start = Start_Ind_3, 
+                                 end = End_Ind_3, line = depart_line)
+      Path2_Info <- get_pathinfo(total = Total_Transfer1_Raw, start = Start_Ind2_3, 
+                                 end = End_Ind2_3, line = Transfer_First_Line)
+      Path3_Info <- get_pathinfo(total = Total_Transfer2_Raw, start = Start_Ind3_3, 
+                                 end = End_Ind3_3, line = Transfer_Second_Line)
+      Path4_Info <- get_pathinfo(total = Total_End_raw, start = Start_Ind4_3, 
+                                 end = End_Ind4_3, line = arrival_line)
+      # get transfer time{ex) depart -> transfer} each
+      Transfer_Time1 <- transfer_info %>% 
+        filter(Transfer_Name == Transfer_First$Name) %>% 
+        filter(Transfer_Line == depart_line & Transfer_Line2 ==  Transfer_First_Line)
+      Transfer_Time2 <- transfer_info %>% 
+        filter(Transfer_Name == Transfer_Second$Name) %>% 
+        filter(Transfer_Line == Transfer_First_Line & Transfer_Line2 == Transfer_Second_Line)
+      Transfer_Time3 <- transfer_info %>% 
+        filter(Transfer_Name == Transfer_Third$Name) %>% 
+        filter(Transfer_Line == Transfer_Second_Line & Transfer_Line2 == arrival_line)
+      if (nrow(Transfer_Time1) >= 1) {
+        Transfer_Time1 <- as.numeric(Transfer_Time1$Transfer_Time)
+      } else {
+        Transfer_Time1 <- 2.35
+      }
+      # if no results about transfer_info data -> print 2.35(citation)
+      if (nrow(Transfer_Time2) >= 1) {
+        Transfer_Time2 <- as.numeric(Transfer_Time2$Transfer_Time)
+      } else {
+        Transfer_Time2 <- 2.35
+      }
+      if (nrow(Transfer_Time3) >= 1) {
+        Transfer_Time3 <- as.numeric(Transfer_Time3$Transfer_Time)
+      } else {
+        Transfer_Time3 <- 2.35
+      }
+      Transfer_3[[i]] <- list(Info = data.frame(Depart = c(depart, Transfer_First$Name, Transfer_Second$Name, Transfer_Third$Name),
+                                                Line = c(depart_line, Transfer_First_Line, Transfer_Second_Line, arrival_line), 
+                                                Count = c(Path1_Info$count, Path2_Info$count, Path3_Info$count, Path4_Info$count),
+                                                Time = c(Path1_Info$time, Path2_Info$time, Path3_Info$time, Path4_Info$time),
+                                                Arrive = c(Transfer_First$Name, Transfer_Second$Name, Transfer_Third$Name, arrival)),
+                              Total = c(Count = sum(Path1_Info$count + Path2_Info$count + Path3_Info$count + Path4_Info$count), 
+                                        Time = sum(Path1_Info$time + Path2_Info$time + Path3_Info$time + Path4_Info$time) +
+                                          Transfer_Time1 + Transfer_Time2 + Transfer_Time3 + 9))
+    }else{
+      Transfer_3[[i]] <- list(Total = c(Time = 300))
+    }
+  }
+  Transfer_3_Count_Time <- c()
+  for (i in seq_along(Transfer_3)) {
+    Transfer_3_Count_Time[i] <- as.numeric(Transfer_3[[i]]$Total["Time"])
+  }
+  Path_3_Shortest <- which.min(Transfer_3_Count_Time)
+  # select shortest path(time depend)
+  Transfer_3 <- Transfer_3[[Path_3_Shortest]]
+  Set <- get_pathresult(Transfer_3)
+  # get_route / consider line number 2 & 6_A for circulate system.
+  return(Set)
+}
+
+### if shortestpath_3 does not work than, shortestpath_4 will work 
+### for 3 nearest transfer available stations
+### it depend on shortestpath_3..
+shortestpath_4 <- function(depart, depart_line, arrival, arrival_line) {
+  result_list <- function(station, line_choose){
+    near_list <- subway_data_G[[line_choose]]
+    index <- which(near_list$Name == station)
+    avaliable_line <- near_list[which(near_list$Transfer != 0),]
+    nearest_rank <- rank(abs(index - which(near_list$Transfer != 0)))
+    nn_list_nm <- avaliable_line$Name[nearest_rank<=3]
+    nn_list_nm
+  }
+  nn_list_nm <- result_list(station = arrival, line_choose = arrival_line)
+  result <- result2 <- result_which <- list()
+  for (i in seq_along(nn_list_nm)) {
+    multi_linecase <- subway_data_G[[arrival_line]] %>% 
+      filter(Name %in% nn_list_nm[i]) %>% select(Transfer) %>% t() %>% as.character()
+    multi_linecase <- str_split(multi_linecase, pattern = "|")[[1]]
+    multi_linecase <- multi_linecase[multi_linecase != ""]
+    multi_linecase <- multi_linecase[multi_linecase != "|"]
+    for (j in seq_along(multi_linecase)){
+      result[[paste0(i, "-", j)]] <- 
+        tryCatch(shortestpath_3(depart, depart_line, 
+                                arrival = nn_list_nm[i], 
+                                arrival_line = multi_linecase[j]), 
+                 error = function(e) {result[[paste0(i, "-", j)]] = list(Time = 300)})
+      result_which[[paste0(i, "-", j)]] <- result[[paste0(i, "-", j)]]$Time
+      result2[[paste0(i, "-", j)]] <- 
+        tryCatch(shortestpath_1(depart = nn_list_nm[i], 
+                                depart_line = multi_linecase[j],
+                                arrival, arrival_line), 
+                 error = function(e) {result2[[paste0(i, "-", j)]] = list(Time = 300)})
+    }
+  }
+  shortest_index <- names(result_which)[which.min(result_which)]
+  result[[shortest_index]]$Info <- rbind(result[[shortest_index]]$Info, 
+                                         result2[[shortest_index]]$Info[2, ])
+  result[[shortest_index]]$Count <- result[[shortest_index]]$Count + result2[[shortest_index]]$Count
+  result[[shortest_index]]$Time <- result[[shortest_index]]$Time + result2[[shortest_index]]$Time
+  result[[shortest_index]]$Path4 <- result2[[shortest_index]]$Path2
+  result <- result[[shortest_index]]
+  if(is.null(result)){      
+    message("If the station and the line do not match, the route can not be obtained.
+also you should consider branch line '1_P','1_A','1_B','2_A','2_B','5_A','6_A' and 'K_A'
+* Guro to Shin Chang Station : '1_P'
+* Geumcheon-gu Office to Kwang Myung Station : '1_A' 
+* Byeongjeom to Seodongtan Station : '1_B'
+* Seongsu to Sinseol-dong Station : '2_A' \n* Sindorim to Kkachisan Station : '2_B'
+* Gangdong to Macheon Station : '5_A' \n* Eungam to Gusan(also include Eungam) Station : '6_A'
+* Gajwa to Seoul Station : 'K_A'")
+  }
+  return(result)
+}
+
+# shortestpath_inner
+shortestpath_all <- function(depart, depart_line, arrival, arrival_line) {
+  if (depart_line == arrival_line) {
+    Zero <- shortestpath_0(depart = depart, depart_line = depart_line, 
+                           arrival = arrival, arrival_line = arrival_line)
+    Total <- list(Zero)
+    Short_Path_Ind <- 1
+  }
+  if (depart_line != arrival_line) {
+    One <- tryCatch(shortestpath_1(depart = depart, depart_line = depart_line, 
+                                   arrival = arrival, arrival_line = arrival_line), 
+                    error = function(e) {
+                                     One = list(Time = 300)
+                                   })
+    Two <- tryCatch(shortestpath_2(depart = depart, depart_line = depart_line, 
+                                   arrival = arrival, arrival_line = arrival_line), 
+                    error = function(e) {
+                                     Two = list(Time = 300)
+                                   })
+    # use tryCatch() for consider error case get results of thw case, and
+    # select shortest path
+    Total <- list(One, Two)
+    Short_Path_Ind <- which.min(c(Total[[1]]$Time, Total[[2]]$Time))
+  }
+  Total <- Total[[Short_Path_Ind]]
+  if (Total$Time == 300) {
+    Total <- tryCatch(shortestpath_3(depart = depart, depart_line = depart_line, 
+                            arrival = arrival, arrival_line = arrival_line),
+                      error = function(e) {
+                        Total = list(Time = 300)
+                      })
+  }
+  # if shortest path(by three transfer) is null -> consider four transfer
+  if (Total$Time == 300) {
+    Total <- shortestpath_4(depart = depart, depart_line = depart_line, 
+                            arrival = arrival, arrival_line = arrival_line)
+  }
+  return(Total)
+}
+
+## shortestpath_G
+### it needs only depart, arrival line.
+### but it spend many time when shortestpath_3 dosen't work..
+shortestpath_G <- function(depart, arrival) {
+  depart_line_list <- subway_data_G_DT[which(subway_data_G_DT$Name %in% 
+                                             c(depart)), ]$Line
+  arrival_line_list <- subway_data_G_DT[which(subway_data_G_DT$Name %in% 
+                                              c(arrival)), ]$Line
+  result <- shortest_index <- list()
+  for (i in seq_along(depart_line_list)) {
+    for (j in seq_along(arrival_line_list)) {
+      result[[paste0(i, "-", j)]] <-
+        tryCatch(shortestpath_all(depart, depart_line = depart_line_list[i],
+                              arrival, arrival_line = arrival_line_list[j]), 
+                 error = function(e) {
+                   result[[paste0(i, "-", j)]] = list(Time = 300)
+                 })
+      shortest_index[[paste0(i, "-", j)]] <-
+        result[[paste0(i, "-", j)]]$Time
+    }
+  }
+  result_return <- result[[names(result)[which.min(shortest_index)]]]
+  return(result_return)
+}
+
+#save(file="line_G/line_G_simulation_fun.RData", get_pathresult, get_transferinfo, 
+#     get_transfercriteria, get_pathinfo, checkline, 
+#     shortestpath_G, shortestpath_all, shortestpath_0, shortestpath_1, 
+#     shortestpath_2, shortestpath_3, shortestpath_4)
+#save(file="line_G/line_G_simulation_data.RData", subway_data_G, subway_data_G_DT, transfer_info, transfer_station_G)
+```
+
+
+## 최단경로 함수를 통한 최단경로쌍 제작 
+```{r}
+setwd("/home/students/kson/line_G")
+#load(file="line_G_simulation_fun.RData")
+#load(file="line_G/data/line_G_simulation_data.RData")
+#load(file="line_G/data/nms.RData")
+load(file="line_G_simulation_data.RData")
+load(file="nms.RData")
+
+subway_data_G[["G"]]$Name <- iconv(subway_data_G[["G"]]$Name,"cp949")
+subway_data_G[["G"]]$Name <- iconv(subway_data_G[["G"]]$Name,"utf8")
+subway_data_G_DT[586:568,]$Name <- iconv(subway_data_G_DT[586:568,]$Name,"cp949")
+subway_data_G_DT[586:568,]$Name <- iconv(subway_data_G_DT[586:568,]$Name,"utf8")
+transfer_station_G[80:87,]$Name <- iconv(transfer_station_G[80:87,]$Name,"cp949")
+transfer_station_G[80:87,]$Name <- iconv(transfer_station_G[80:87,]$Name,"utf8")
+seoul_route <- nms
+subway_route_G <- list()
+
+get_path <- function(depart, arrival){
+  result <- shortestpath_G(depart, arrival)
+  station <- "no_result"
+  index <- result %>% names %>% str_which("Path")
+  if(!(result$Time %in% c(300,600))){
+    Path <- result[[index[1]]]
+    for(i in 2:length(index)){
+      Path <- rbind(Path, result[[index[i]]])
+    }
+    station <- Path$Name %>% unique()
+  }
+  n_row <- length(station)
+  station_1 <- station[1:(n_row-1)]
+  station_2 <- station[2:n_row]
+  result_set <- data.frame(set=paste0(depart, "-", arrival),
+                           from=station_1, to=station_2)
+  return(result_set %>% na.omit)
+}
+
+for(i in 1:length(nms)){
+  for(j in i:length(nms)){
+    subway_route_G[[paste0(seoul_route[i],"-",seoul_route[j])]] <-
+      get_path(depart=seoul_route[i],arrival=seoul_route[j])
+  }
+    if(i %in% c(10*(seq(1,30,4)),length(nms))){
+    save(file="/home/students/kson/line_G/subway_route_G0529.RData",subway_route_G)
+  }
+}
+
+i <- 1
+result_return <- subway_route_G[[i]]
+for(i in 2:length(subway_route_G)){
+  result_return <- rbind(result_return, subway_route_G[[i]])
+}
+
+## 최종 최단경로 자료구조 구축
+
+#saveRDS(file="../data/shortestpath_G_0529.RDS", result_return)
+#result_return <- readRDS(file="../data/shortestpath_G_0529.RDS")
+
+nullset <- result_return %>% 
+  filter(from == "no_result") %>% 
+  dplyr::select(set) %>% t() %>% as.character()
+nullset <- data.frame(nullset) %>%
+  separate(nullset, c("first", "second"), sep="-", remove=FALSE)
+
+i <- 1
+result_null_return <- get_path(nullset$first[1], nullset$second[1])
+for(i in 2:nrow(nullset)){
+  result_null_return <- 
+    rbind(result_null_return, get_path(nullset$first[i], nullset$second[i]))
+}
+
+result_null_return %>% filter(from == "no_result")
+
+result_return_tot <- rbind(result_return, result_null_return)
+result_return_tot <- result_return_tot %>% filter(from != "no_result")
+
+result_return_tot_rev <- result_return_tot %>%
+  mutate(from_2 = from, to_2 = to) %>% 
+  rename(to_rev = from_2, from_rev = to_2) %>% 
+  separate(set, c("set1", "set2")) %>% 
+  mutate(set = paste0(set2, "-", set1)) %>% 
+  dplyr::select(set, from_rev, to_rev) %>% 
+  rename(from = from_rev, to = to_rev)
+
+shortestpath_db_G <- rbind(result_return_tot_rev, result_return_tot)
+saveRDS(file="../data/shortestpath_db_G.RDS", shortestpath_db_G)
+```
+
