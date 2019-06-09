@@ -60,165 +60,16 @@ include_graphics(path=c("../figure/line.png"))
 
 2019년 2월 20일 발표한 `서울특별시 도시철도망 구축계획`을 통해 목동~청량리를 잇는 강북횡단선 등 6개 노선 신설에 대한 계획이 공개되었다. 본 논문에서는 강북횡단선에 대하여 고려할 것이다. 우선 강북횡단선을 기존 구축한 지하철 네트워크에 추가하는 과정이 필요하다.
 
-```{r, eval=FALSE}
-Code <- paste0("G", 101:119)
-ExCode <- paste0("G", 101:119)
-Name <- c("청량리", "홍릉", "월곡", "종암사거리", "길음", "정릉", "국민대",
-          "평창동", "상명대입구", "홍제", "서대문구청", "명지대",
-          "남가좌", "디지털미디어시티", "상암", "등촌", "신등촌",
-          "목동사거리", "목동")
-long <- rep(NA, 19)
-lat <- rep(NA, 19)
-Line <- rep('G', 19)
-
-address <- c('서울특별시 전농1동 청량리역',
-             '서울특별시 동대문구 청량리동 회기로 57',
-             '서울특별시 월곡2동', '서울특별시 성북구 종암동 3-1288',
-             '서울특별시 성북구 길음1동 877-66', 
-             '서울특별시 정릉1동', '서울특별시 성북구 정릉동 정릉로 77',
-             '서울특별시 종로구 평창동 127', '서울특별시 종로구 홍지동 72-11',
-             '서울특별시 서대문구 홍제동 305-5', '서울특별시 서대문구 연희동 연희로 248',
-             '서울특별시 서대문구 남가좌2동 355-7',
-             '서울특별시 서대문구 남가좌2동', '디지털미디어시티역',
-             '서울특별시 마포구 성산2동 513-4', '서울특별시 강서구 등촌1동',
-             '서울특별시 양천구 목동 713-8', 
-             '서울특별시 강서구 화곡4동 939-2',
-             '서울특별시 목1동 목동역')
-
-Transfer <- c("1|B|K", 0, "6",  0, "4", "UI", 0, 0, 0,
-              "3", 0, 0, 0, "6|A|K", 0, 9, 0, 0, 5)
-
-for(i in (i+1):19){
-result <- geocode_kakao(address[i],  kakao_key = "bd0f02bafa236ced3eebb2d12845a306")
-long[i] <- result$lon
-lat[i] <- result$lat
-}
-
-line_G <- data.table::data.table(Code, Name, Line, ExCode, CyCode, X, Y, lat, long, Transfer)
-
-line_G[1,c('lat', 'long')] <-  
-  subway_data_G_DT[which(subway_data_G_DT=="청량리")[1],c('lat', 'long')]
-line_G[14,c('lat', 'long')] <-  
-  subway_data_G_DT[which(subway_data_G_DT=="디지털미디어시티")[1],c('lat', 'long')]
-line_G[19,c('lat', 'long')] <- subway_data_G_DT[which(subway_data_G_DT=="목동"),c('lat', 'long')]
-
-line_G[8,c('lat', 'long')] <- geocode_kakao('서울시 종로구 평창동 평창길',  kakao_key = "bd0f02bafa236ced3eebb2d12845a306")
-line_G$lat <- round(as.numeric(line_G$lat), 7)
-line_G$long <- round(as.numeric(line_G$long), 7)
-line_G[12,c('lat', 'long')] <- data.table::data.table(37.576357, 126.926395)
-line_G[13,c('lat', 'long')] <- data.table::data.table(37.571830, 126.921170)
-## 시간, 거리 계산
-line_G$Dist <- NA
-line_G$Time <- NA
-
-for(i in 1:18){
-  line_G$Dist[(i+1)] <- 
-    distHaversine(line_G[i,c('long','lat')]%>%t() %>%as.numeric(),
-                  line_G[i+1,c('long','lat')]%>%t() %>%as.numeric())
-  line_G$Time[(i+1)] <- line_G$Dist[(i+1)]/566
-}
-
-
-line_G$Dist[1] <- line_G$Time[1] <- 0
-line_G$Transfer <- Transfer
-
-#save(file="line_G/line_G.RData", line_G)
-```
-
-```{r, eval=FALSE}
-## 환승역 수정한 데이터셋 정의  
-
-data("subway_data")
-subway_data_G <- subway_data
-subway_data_G[["G"]] <- line_G
-
-# 1.
-subway_data_G[["1"]][which(subway_data_G[["1"]]$Name=="청량리"),"Transfer"] <- "B|K|G"
-subway_data_G[["B"]][which(subway_data_G[["B"]]$Name=="청량리"),"Transfer"] <- "1|K|G"
-subway_data_G[["K"]][which(subway_data_G[["K"]]$Name=="청량리"),"Transfer"] <- "1|B|G"
-
-# 2. 
-subway_data_G[["6"]][which(subway_data_G[["6"]]$Name=="월곡"),"Transfer"] <- "G"
-
-# 3. 
-subway_data_G[["4"]][which(subway_data_G[["4"]]$Name=="길음"),"Transfer"] <- "G"
-
-# 4.
-subway_data_G[["UI"]][which(subway_data_G[["UI"]]$Name=="정릉"),"Transfer"] <- "G"
-
-# 5.
-subway_data_G[["3"]][which(subway_data_G[["3"]]$Name=="홍제"),"Transfer"] <- "G"
-
-# 6. 
-subway_data_G[["6"]][which(subway_data_G[["6"]]$Name=="디지털미디어시티"),"Transfer"] <- "A|K|G"
-subway_data_G[["A"]][which(subway_data_G[["A"]]$Name=="디지털미디어시티"),"Transfer"] <- "6|K|G"
-subway_data_G[["K"]][which(subway_data_G[["K"]]$Name=="디지털미디어시티"),"Transfer"] <- "6|A|G"
-
-# 7.
-subway_data_G[["9"]][which(subway_data_G[["9"]]$Name=="등촌"),"Transfer"] <- "G"
-
-# 8.
-subway_data_G[["5"]][which(subway_data_G[["5"]]$Name=="목동"),"Transfer"] <- "G"
-save(file="line_G/subway_data_G.RData", subway_data_G)
-
-data(transfer_station)
-transfer_station_G <- transfer_station
-transfer_name_G <- line_G %>% filter(Transfer!=0) %>% select(Name) %>% t() %>% as.character
-
-line_G_transfer_station <- line_G %>% 
-  dplyr::select(Name, lat, long, Transfer) %>% 
-  filter(Transfer!=0) %>% 
-  mutate(Transfer = paste0(Transfer, "|G"))
-
-transfer_station_G <- rbind(transfer_station_G[-which(transfer_station_G$Name%in%c('청량리', '디지털미디어시티')),], line_G_transfer_station)
-
-save(file="line_G/transfer_station_G.RData", transfer_station_G)
-
-data(subway_data_DT)
-
-subway_data_G_DT <- subway_data_G[["1"]]
-for(i in 2:length(subway_data_G)){
-  subway_data_G_DT <- rbind(subway_data_G_DT, subway_data_G[[i]])
-}
-
-save(file="line_G/subway_data_G_DT.RData", subway_data_G_DT)
-
-# 1. 청량리 환승가능 1/B/K/G
-# 2. 월곡 환승가능 6/G
-# 3. 길음 환승가능 4/G
-# 4. 정릉 환승가능 UI/G
-# 5. 홍제 환승가능 3/G
-# 6. 디지털미디어시티 환승가능 6/A/K/G
-# 7. 등촌 환승가능 9/G
-# 8. 목동 환승가능 5/G
-```
 
 ```{r}
 load(file="../data/line_G.RData")
 load(file="../data/subway_data_G.RData")
 load(file="../data/subway_data_G_DT.RData")
 load(file="../data/transfer_station_G.RData")
-
 kable(line_G)
 ```
 
 위 표와 같이 8개의 환승역이 포함된 19개의 지하철 역에 대한 지하철 네트워크를 구축하였다. 이 과정을 통하여 신규노선이 반영되었을 때, 이를 반영한 네트워크를 구축하여 시뮬레이션할 수 있다.
-
-```{r, eval=FALSE}
-subway_data_G[[1]]
-subway_data_G[[3]]
-subway_data_G[[5]]
-subway_data_G[[6]]
-subway_data_G[[11]]$Time <- round(subway_data_G[[11]]$Time,2)
-subway_data[[11]]$Time <- round(subway_data[[11]]$Time,2)
-subway_data_G[[14]]
-subway_data_G[[22]]
-subway_data_G[["4"]][18,"Transfer"] <- "1|A|K_A"
-subway_data_G[[22]][1,"Transfer"] <- "1|4|K_A"
-
-#save(file="line_G/subway_data_G.RData", subway_data_G)
-#save(file="line_G/subway_data_G_DT.RData", subway_data_G_DT)
-```
 
 
 ### 1.3 구성한 네트워크를 통한 최단경로 데이터베이스 구축

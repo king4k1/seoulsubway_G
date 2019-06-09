@@ -810,6 +810,7 @@ load(file="nms.RData")
 
 subway_data_G[["G"]]$Name <- iconv(subway_data_G[["G"]]$Name,"cp949")
 subway_data_G[["G"]]$Name <- iconv(subway_data_G[["G"]]$Name,"utf8")
+
 subway_data_G_DT[586:568,]$Name <- iconv(subway_data_G_DT[586:568,]$Name,"cp949")
 subway_data_G_DT[586:568,]$Name <- iconv(subway_data_G_DT[586:568,]$Name,"utf8")
 transfer_station_G[80:87,]$Name <- iconv(transfer_station_G[80:87,]$Name,"cp949")
@@ -842,18 +843,24 @@ for(i in 1:length(nms)){
       get_path(depart=seoul_route[i],arrival=seoul_route[j])
   }
     if(i %in% c(10*(seq(1,30,4)),length(nms))){
-    save(file="/home/students/kson/line_G/subway_route_G0529.RData",subway_route_G)
+    save(file="/home/students/kson/line_G/subway_route_G0609.RData",subway_route_G)
   }
 }
 
+setwd("D:/workspace/seoulsubway_G/line_G/code")
+#load(file="../data/subway_route_G0529.RData")
 i <- 1
 result_return <- subway_route_G[[i]]
 for(i in 2:length(subway_route_G)){
   result_return <- rbind(result_return, subway_route_G[[i]])
 }
 
+```
+
+
 ## 최종 최단경로 자료구조 구축
 
+```{r}
 #saveRDS(file="../data/shortestpath_G_0529.RDS", result_return)
 #result_return <- readRDS(file="../data/shortestpath_G_0529.RDS")
 
@@ -884,6 +891,6 @@ result_return_tot_rev <- result_return_tot %>%
   rename(from = from_rev, to = to_rev)
 
 shortestpath_db_G <- rbind(result_return_tot_rev, result_return_tot)
-saveRDS(file="../data/shortestpath_db_G.RDS", shortestpath_db_G)
+saveRDS(file="../data/shortestpath_db_G0530.RDS", shortestpath_db_G)
 ```
 
