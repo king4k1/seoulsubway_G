@@ -34,10 +34,10 @@ library(data.table)
 library(randomForest)
 library(glmnet)
 #install.packages("glmnet")
-library(seoulsubway)
 library(rpart)
+library(seoulsubway)
 set.seed(2018710174)
-#setwd("C:/Users/82104/Desktop/seoulsubway_G/line_G/code")
+#setwd(paste0(getwd(), "/line_G/code"))
 
 pdf.options(family = "Korea1deb")
 data(subway_data_DT)
@@ -1029,40 +1029,72 @@ ridership_mean_infoset_train <- ridership_mean_infoset %>%
   mutate(Time = as.numeric(Time), on_off = as.factor(on_off))
 
 rpart.ct <- rpart.control(xval=10,cp=0.0001)
-
 rpart_fit <- rpart(formula=mean_count~., 
                    data=ridership_mean_infoset_train, 
                    method="anova", control=rpart.ct)
+
+rf_fit <- randomForest(mean_count ~. ,
+                       data = ridership_mean_infoset_train,
+                       mtry=floor(43/3), ntree=50)
+plot(rf_fit)
+Implot(rf_fit)
+randomForest::varImpPlot(rf_fit)
 plotcp(rpart_fit)
 printcp(rpart_fit)
-
 plot(rpart_fit)
 text(rpart_fit)
-rpart_fit$cptable[which.min(rpart_fit$cptable[,"xerror"]),] %>% 
-  kable(col.names = "값", caption = "오분류율을 최소로 하는 cp값")
 
 day_choose <- "Fri" ; time_choose <- "20" ; on_off_choose <- "off"
 new_data <- station_seoul_info %>% 
   filter(station %in% station_predict) %>%
   dplyr::select(-station, -usz_green, -address) %>% 
-  mutate(Day = day_choose, Time = time_choose, on_off = on_off_choose) %>% 
+  mutate(Day = factor(day_choose, levels=levels(ridership_mean_infoset_train$Day)), 
+         Time = time_choose, on_off = factor(on_off_choose, levels(ridership_mean_infoset_train$on_off))) %>% 
   mutate(Time = as.numeric(Time), on_off = as.factor(on_off)) %>% 
   dplyr::select(colnames(ridership_mean_infoset_train)[-4])
 
-station_seoul_info %>% 
+rpart_predict <- station_seoul_info %>% 
   filter(station %in% station_predict) %>% 
   mutate(pred = predict(rpart_fit, new_data))
  
+rf_predict <- station_seoul_info %>% 
+  filter(station %in% station_predict) %>% 
+  mutate(pred = predict(rf_fit, new_data))
+
+plot(rpart_predict$pred, rf_predict$pred)
 ```
 
 ```{r}
+predict_count_rf <- function(day_choose = "Fri", time_choose = "20", on_off_choose = "off"){
+  station_predict <- setdiff(station_seoul_info$station,
+                             ridership_mean_infoset$station)
+  new_data <- station_seoul_info %>% 
+    filter(station %in% station_predict) %>%
+    dplyr::select(-station, -usz_green, -address) %>% 
+    mutate(Day = factor(day_choose, levels=levels(ridership_mean_infoset_train$Day)), 
+           Time = time_choose, on_off = factor(on_off_choose, levels(ridership_mean_infoset_train$on_off))) %>% 
+    mutate(Time = as.numeric(Time), on_off = as.factor(on_off)) %>% 
+    dplyr::select(colnames(ridership_mean_infoset_train)[-4])
+
+  station_seoul_info %>% 
+    filter(station %in% station_predict) %>% 
+    mutate(mean_count = predict(rf_fit, new_data)) %>% 
+    mutate(Day = day_choose, Time = time_choose, on_off = on_off_choose) %>% 
+    mutate(Time = as.numeric(Time), on_off = as.factor(on_off)) %>% 
+    dplyr::select(-usz_green, -address) %>% 
+    rbind(ridership_mean_infoset %>% ungroup %>%
+            dplyr::select(-usz_green, -address) %>% 
+            filter(Time == time_choose, Day == day_choose, on_off == on_off_choose) %>% 
+            mutate(Time = as.numeric(Time), on_off = as.factor(on_off)))
+}
 predict_count_rpart <- function(day_choose = "Fri", time_choose = "20", on_off_choose = "off"){
   station_predict <- setdiff(station_seoul_info$station,
                              ridership_mean_infoset$station)
   new_data <- station_seoul_info %>% 
     filter(station %in% station_predict) %>%
     dplyr::select(-station, -usz_green, -address) %>% 
-    mutate(Day = day_choose, Time = time_choose, on_off = on_off_choose) %>% 
+    mutate(Day = factor(day_choose, levels=levels(ridership_mean_infoset_train$Day)), 
+           Time = time_choose, on_off = factor(on_off_choose, levels(ridership_mean_infoset_train$on_off))) %>% 
     mutate(Time = as.numeric(Time), on_off = as.factor(on_off)) %>% 
     dplyr::select(colnames(ridership_mean_infoset_train)[-4])
 
@@ -1078,6 +1110,7 @@ predict_count_rpart <- function(day_choose = "Fri", time_choose = "20", on_off_c
             mutate(Time = as.numeric(Time), on_off = as.factor(on_off)))
 }
 
+predict_count_rf(day_choose = "Fri", time_choose = "20", on_off_choose = "off")
 predict_count_rpart(day_choose = "Fri", time_choose = "20", on_off_choose = "off")
 ```
 
@@ -1088,8 +1121,8 @@ predict_count_rpart(day_choose = "Fri", time_choose = "20", on_off_choose = "off
 * generate된 데이터셋을 통하여 경로데이터 추가
 
 ```{r}
-on_fri_15 <- predict_count_rpart(day_choose = "Fri", time_choose = "15", on_off_choose = "on")
-off_fri_15 <- predict_count_rpart(day_choose = "Fri", time_choose = "15", on_off_choose = "off")
+on_fri_15 <- predict_count_rf(day_choose = "Fri", time_choose = "15", on_off_choose = "on")
+off_fri_15 <- predict_count_rf(day_choose = "Fri", time_choose = "15", on_off_choose = "off")
 
 MC_sampling <- function(input_data, on_off_choose){
   result_generate <- list()
@@ -1194,12 +1227,11 @@ head(subway_04_route) %>% kable()
 
 subway_04_route_daymean : 요일/시간대별 `출발역-도착역` 경로 평균
 
-```{r, eval=FALSE}
+```{r}
 subway_04_route_daymean <- subway_04_route %>% 
   group_by(day, ride_on, ride_off, time) %>% 
   summarise(mean_count = sum(count))
 
-#save(file="../data/subway_04_route_daymean.RData", subway_04_route_daymean)
 ```
 
 
@@ -1209,16 +1241,11 @@ subway_04_route_daymean <- subway_04_route %>%
 
 * 특정요일, 특정시간대 평균 count 확인
 
-```{r}
-#setwd("D:/workspace/seoulsubway/line_G/code")
-load(file="../data/subway_04_route_daymean.RData")
-```
-
 ```{r, echo=TRUE}
 time_choose <- "15"
 day_choose <- "Fri"
 
-on_fri_15 <- predict_count_rpart(day_choose = "Fri", time_choose = "15", on_off_choose = "on")
+on_fri_15 <- predict_count_rf(day_choose = "Fri", time_choose = "15", on_off_choose = "on")
 MC_sampling(on_fri_15, "on")
 
 summarise_count_db <- function(day_choose, time_choose){
@@ -1259,19 +1286,20 @@ summarise_count_db(day_choose="Fri", time_choose="15")
 ```{r, echo=TRUE}
 predict_demand_line <- function(day_choose, time_choose, line_choose) {
   line_c <- subway_data_G[[line_choose]]$Name
-  pred_on <- predict_count_rpart(day_choose = day_choose, time_choose = time_choose, on_off_choose = "on")
-  pred_off <- predict_count_rpart(day_choose = day_choose, time_choose = time_choose, on_off_choose = "off")
+  pred_on <- predict_count_rf(day_choose = day_choose, time_choose = time_choose, on_off_choose = "on")
+  pred_off <- predict_count_rf(day_choose = day_choose, time_choose = time_choose, on_off_choose = "off")
   result_sum <- summarise_count_db(day_choose = day_choose, time_choose = time_choose)
   result_onoff <- pred_on %>% rename(pred_on = mean_count, on = on_off) %>% 
     left_join(pred_off) %>% rename(pred_off = mean_count, off = on_off) %>% 
     filter(station %in% line_c) %>% 
-    mutate(day = day_choose) %>% 
+    mutate(day = day_choose, pred_on = floor(pred_on), pred_off = floor(pred_off)) %>% 
     dplyr::select(Day, Time, station, pred_on, pred_off) %>% 
     rename(day = Day, time = Time)
   result_path_sum <- result_sum %>% 
     filter(from %in% line_c, to %in% line_c) %>% 
     mutate(day = day_choose) %>% 
-    dplyr::select(day, time, from, to, mean)
+    dplyr::select(day, time, from, to, mean) %>% 
+    filter(from != to)
   list(on_off = result_onoff, path = result_path_sum)
 }
 
@@ -1399,7 +1427,7 @@ predict_week_onoff %>%
   kable()
 ```
 
-4. 역 사이 구간별 예상값
+4. 역 사이 구간 수요
 
 * 이용객 개별 승하차데이터를 통하여 계산된 결과로써 각 노선내에서 출발하는 경우가 고려되어지지 않는다. 이는 데이터가 가지는 한계로써 1-8호선에서 출발하고 도착하는 경우만 고려되었기 때문에 아래와 같은 구간 수가 계산된다.  
 
