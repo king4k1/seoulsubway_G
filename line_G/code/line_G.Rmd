@@ -125,7 +125,7 @@ subway_route_G_0411[["길음-청량리"]]
 
 
 ```{r}
-shortestpath_db_G <- readRDS(file="../data/shortestpath_db_G.RDS")
+shortestpath_db_G <- readRDS(file="../data/shortestpath_db_G0610.RDS")
 ```
 
 또한 최단거리 데이터베이스는 출발역과 도착역 쌍에 대하여는 순서가 바뀌어도 동일한 결과를 산출하므로 우선 254개의 지하철 역에 대하여 254x254 상삼각행렬에 해당하는 경우를 구한 후, 하삼각행렬에 해당하는 경우는 순서가 바꾸어진 결과를 산출하는 함수를 제작하여 완성하였다. 
@@ -1241,12 +1241,11 @@ subway_04_route_daymean <- subway_04_route %>%
 
 * 특정요일, 특정시간대 평균 count 확인
 
+* MC sampling 결과 포함 
+
 ```{r, echo=TRUE}
 time_choose <- "15"
 day_choose <- "Fri"
-
-on_fri_15 <- predict_count_rf(day_choose = "Fri", time_choose = "15", on_off_choose = "on")
-MC_sampling(on_fri_15, "on")
 
 summarise_count_db <- function(day_choose, time_choose){
   route_choose <- as.data.table(subway_04_route_daymean)
@@ -1255,8 +1254,16 @@ summarise_count_db <- function(day_choose, time_choose){
   setkey(route_choose_frist, time)
   route_choose_second <- route_choose_frist[time==time_choose,]
   route_choose_second <- route_choose_second %>% 
-    mutate(set = paste0(ride_on, "-", ride_off))
-  unit <- route_choose_second %>% 
+    mutate(set = paste0(ride_on, "-", ride_off)) %>% as_tibble()
+  on_case <- predict_count_rf(day_choose = day_choose, time_choose = time_choose, 
+                              on_off_choose = "on") %>% MC_sampling( on_off_choose =  "on") %>% 
+    dplyr::select(day, depart, arrival, time, count) %>% mutate(set = paste0(depart, "-", arrival)) %>% 
+    rename(ride_on = depart, ride_off = arrival, mean_count = count)
+  off_case <- predict_count_rf(day_choose = day_choose, time_choose = time_choose, 
+                              on_off_choose = "off") %>% MC_sampling( on_off_choose =  "off") %>% 
+    dplyr::select(day, depart, arrival, time, count) %>% mutate(set = paste0(depart, "-", arrival)) %>% 
+    rename(ride_on = depart, ride_off = arrival, mean_count = count)
+  unit <- route_choose_second %>% rbind(on_case, off_case) %>% 
     left_join(shortestpath_db_G) %>%
     mutate_all(as.character) %>% 
     ungroup %>% group_by(time, from, to) %>% 
@@ -1297,7 +1304,7 @@ predict_demand_line <- function(day_choose, time_choose, line_choose) {
     rename(day = Day, time = Time)
   result_path_sum <- result_sum %>% 
     filter(from %in% line_c, to %in% line_c) %>% 
-    mutate(day = day_choose) %>% 
+    mutate(day = day_choose, time = time_choose) %>% 
     dplyr::select(day, time, from, to, mean) %>% 
     filter(from != to)
   list(on_off = result_onoff, path = result_path_sum)
@@ -1314,15 +1321,15 @@ predict_demand_line(day_choose="Tue", time_choose="17", line_choose="G")
 
 ```{r, eval=FALSE}
 day_choose_list <- c("Sun", "Mon", "Tue", "Wed","Thr", "Fri", "Sat")
-time_choose_list <- str_sort(as.character(unique(ridership_mean_infoset$Time)))
+time_choose_list <- as.numeric(unique(ridership_mean_infoset$Time))
 
 predict_week <- list()
 for(i in seq_along(day_choose_list)){
   for(j in seq_along(time_choose_list)){
       predict_week[[paste0(day_choose_list[i], "-", time_choose_list[j])]] <- 
-        tryCatch(predict_demand_line(day_choose=day_choose_list[i], 
-                            time_choose=time_choose_list[j],
-                            line_choose="G"),
+        tryCatch(predict_demand_line(day_choose=day_choose_list[i],
+                                     time_choose=time_choose_list[j],
+                                     line_choose="G"),
                  error=function(e){list("no result")})
   }
 }
@@ -1336,26 +1343,18 @@ for(i in 2:length(predict_week)){
                              predict_week[[i]]$path)
 }
 
-predict_week_onoff
-predict_week_path
 
 #save(file="../data/predict_result.RData", predict_week_onoff, predict_week_path)
 ```
 
 predict_week_onoff : Sun 00시부터 Sat 23시까지 랜덤포레스트알고리즘을 이용한 강북횡단선 내 지하철역 승하차 예측값
 
-predict_week_path : Sun 00시부터 Sat 23시까지의 데이터 기반 강북횡단선 내 구간 이동 경로 카운트
+predict_week_path : Sun 00시부터 Sat 23시까지의 데이터 기반 강북횡단선 내 구간 이동 경로 카운트(평균)
 
 ```{r}
 load(file="../data/predict_result.RData")
 API_key <- 'AIzaSyCvFJzO8nrvmospv--Mhi9XypO7PvBcZcw'
 register_google(key = API_key)
-```
-
-```{r, echo=TRUE}
-predict_week_onoff
-
-predict_week_path
 ```
 
 \newpage
@@ -1390,7 +1389,9 @@ onoff_daily_gather %>%
   coord_cartesian(ylim=c(0, 25000)) + 
   facet_wrap(~station, ncol = 4, scales = "free") + theme_bw() +
   ggtitle("predict value of ride off(day)")
+
 ```
+
 길음, 종암사거리, 목동 순으로 역별 승하차 이용객수가 많게 예측되었다. 이는 역 주위정보가 반영된 결과이다.
 
 2. 시간대별 역/요일/승/하차별 승하차 수요예측 결과
@@ -1423,8 +1424,7 @@ predict_week_onoff %>%
   group_by(day) %>% 
   summarise(ride_on = sum(pred_on),
             ride_off = sum(pred_off),
-            mean = (ride_on+ride_off)/2) %>% 
-  kable()
+            mean = (ride_on+ride_off)/2) %>% kable()
 ```
 
 4. 역 사이 구간 수요
@@ -1498,9 +1498,9 @@ path_count_G(time_choose = "17", day_choose = "Fri", up_down="down")
 ```
 
 ```{r out.width="100%", fig.align="center", echo=TRUE}
-path_count_G(time_choose = "07", day_choose = "Mon", up_down="up")
+path_count_G(time_choose = "7", day_choose = "Mon", up_down="up")
 
-path_count_G(time_choose = "07", day_choose = "Mon", up_down="down")
+path_count_G(time_choose = "7", day_choose = "Mon", up_down="down")
 ```
 
 
