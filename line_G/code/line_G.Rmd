@@ -1,5 +1,5 @@
 ---
-title: "Demand forecasts of Gangbuk line using subway users getting on and off data"
+title: "이용객 개별 승하차 데이터를 이용한 신설예정노선 수요예측: 강북횡단선을 중심으로"
 author: |
   | KwangMin Son
   | Department of Statistics, SKKU
@@ -24,6 +24,7 @@ library(geosphere)
 library(nkmap)
 library(knitr)
 library(maptools)
+library(mapproj)
 library(rgdal)
 library(rgeos)
 library(raster)
@@ -46,7 +47,7 @@ data("subway_data_DT")
 ```
 
 
-## 1. 현황 및 분석목적
+## 1. Introduction
 
 ### 1.1 현황
 
@@ -68,7 +69,13 @@ data("subway_data_DT")
 
 우선 수도권 지하철 네트워크를 구축하여 환승시간, 지하철 위치정보 등 공공데이터를 활용한 지하철 최단경로 알고리즘은 `모든 지하철 이용객들은 가장 시간이 적게 걸리는 이동경로를 통하여 이동 한다.`라는 가정하에 제작한다. 이를 활용한 이용객 개별 승하차 데이터 분석을 통하여 인구흐름과 혼잡구간 등을 추정한다. 하지만 같은 `출발역-도착역`로 이동하는 이용객들의 이동경로를 최단경로로 통일함으로써 개인의 성향차이를 배제한다는 단점이 있다. 
 
-## 2. 최단경로 함수
+## 2. Shortestpath function
+
+
+```{r}
+names(subway_data)
+
+```
 
 ### 2.1 지하철 네트워크 구축 
 
@@ -85,15 +92,15 @@ subway_data[["6"]] %>%
 
 이동 간 소요시간을 생각할 때, 다음 3가지를 고려한다.
 
-1. 도로주소 시스템에서 제공되는 shape파일을 이용하여 두 지점 간 최단거리를 계산한다.
+1. 도로주소 시스템에서 제공되는 shape파일을 이용하여 두 지점 간 노선거리를 계산한다.
 
-* 도로명주소 개발자센터 > 전자지도 다운로드 http://www.juso.go.kr/addrlink/main.do
+* 도로명주소 개발자센터 > 전자지도 다운로드 > 도로명주소 배경지도 http://www.juso.go.kr/addrlink/main.do (2019년 01월 11일자)
 
 두 역 사이 거리를 측정한 후, "서울메트로. "지하철 표정속도는 34km/h이다." [1] 을 참고하여 역간 소요시간을 계산하였다. 
 
-2. 공공데이터포털 내 제공되는 `환승역, 환승거리 및 소요시간 정보(서울교통공사 17.10 기준)`를 참고하여 환승 시 소요시간을 반영하였다. 하지만 모든 환승역에 대한 정보가 제공되지 않아 제공되지 않는 환승역은 `이세중. “환승할 때 뛰지 마세요”…서울지하철 열차 시간표 조정 (KBS NEWS),2017년 6월 20일` [2] 을 참고하였다. 또한 일반적인 경우 환승 시 지하철 대기시간이 추가적으로 소요된다. 따라서 대기시간으로 2분을 추가하였다.
+2. 공공데이터포털 내 제공되는 `환승역, 환승거리 및 소요시간 정보(서울교통공사 17.10 기준)`를 참고하여 환승 시 소요시간을 반영하였다. 하지만 모든 환승역에 대한 정보가 제공되지 않아 제공되지 않는 환승역은 `이세중. “환승할 때 뛰지 마세요”…서울지하철 열차 시간표 조정 (KBS NEWS),2017년 6월 20일` [2] 을 참고하였다. 
 
-3. 지하철 정차시간을 고려하기 위하여 소요시간에 이동 역당 30초를 추가하였다.
+3. 환승 후 대기시간 : 지하철 배차시간 반영 
 
 
 ### 2.3 함수 제작
@@ -124,19 +131,49 @@ knitr::include_graphics("../figure/transfer_2.png")
 
 * 종로3가역에서 혜화역으로의 최단경로 함수 결과
 
-```{r out.width="70%", echo=TRUE, fig.pos = 'H', fig.align='center'}
+```{r out.width="70%", echo=FALSE, fig.pos = 'H', fig.align='center'}
 shortestpath(departure = "길음", arrival = "청량리")
 ```
 
 최단경로 함수의 결과는 크게 Info, Count, Time, 그리고 Path로 구성된다. Info는 이동경로에 대한 요약 정보이다. Count와 Time은 경유역 수와 소요시간에 대한 정보이며, Path는 경유하는 지하철 역에 대한 정보를 제공한다.
 
 ```{r out.width="70%", fig.pos = 'H', fig.align='center', fig.cap="길음역에서 혜화역으로의 최단경로"}
-shortestpath_plot(departure = "길음",  arrival = "청량리", google_key = API_key, zoom = 13)
+shortestpath_plot <- function (departure, arrival, google_key, zoom = zoom) 
+{
+    register_google(key = google_key)
+    result <- shortestpath(departure, arrival, max_route=1)[[1]] %>% get_pathresult()
+    Info <- result$Info
+    index <- result %>% names %>% str_which("Path")
+    Path <- result[[index[1]]]
+    if (length(index) > 1) {
+        for (i in 2:length(index)) {
+            Path <- rbind(Path, result[[index[i]]])
+        }
+    }
+    meanX <- mean(as.numeric(Path$long))
+    meanY <- mean(as.numeric(Path$lat))
+    g <- ggmap(get_map(c(meanX + 0.003, meanY + 0.003), zoom = zoom, maptype = "toner-lite", 
+        source = "stamen")) + geom_path(data = Path, aes(x = as.numeric(long), 
+        y = as.numeric(lat), col = Line, size=4)) + geom_label(data = Path %>% 
+        filter(!duplicated(Name)), aes(x = as.numeric(long), 
+        y = as.numeric(lat), label = Name), fill = "black", col = "white", 
+        alpha = 0.5)
+    return(g)
+}
+
+shortestpath_plot(departure = "길음",  arrival = "청량리", google_key = API_key, zoom = 14) + 
+  scale_colour_manual(values=c( "#3F51B5", "#8BC34A", "skyblue")) + 
+  theme(legend.position="none") + xlab("경도") + ylab("위도")  + scale_fill_viridis_c() + scale_color_viridis_d()
+  #theme(strip.text = element_text(size=10), axis.title=element_text(size=10),
+  #      legend.position = "none",
+  #      axis.text = element_text(size=10))
+  
+#ggsave(filename="subway_path_ex.pdf", path="D:/workspace/seoulsubway_G/line_G/figure")
 ```
 
 위 최단경로 함수 결과 중 `Path`를 지도 위 시각화하여 이동경로에 대한 정보를 확인할 수 있다.
 
-## 3. 활용 데이터 소개 
+## 3. Data discription
 
 ### 3.1 원자료: 이용객 개별 승하차 데이터
 
@@ -149,13 +186,13 @@ load(file = '../data/sample_subway_data_0407.RData')
 sample_subway_data_0407 %>% 
   mutate(ID = paste0('#', 1:10)) %>% 
   head() %>% 
-  kable(format="latex", caption = '2019년 04년 07일의 이용객 개별 승하차 데이터 예시') %>%
+  kable(format="latex", caption = '2018년 04년 07일의 이용객 개별 승하차 데이터 예시') %>%
   kable_styling(font_size = 7)
 ```
 
 분석 시 `ID`, `운행일자`, `요일`, `승차호선명`, `승차역명`, `하차호선명`, `하차역명`, `시간대` 그리고 `승객수` 변수만을 고려하며, `시간대`는 하차 시간대를 의미한다.  `이용객 개별 승하차 데이터`는 1-8호선과 241개의 지하철 역으로 구성되며, 1호선의 경우는 서울교통공사 소속인 `서울 - 청량리` 구간만 포함한다. 
 
-## 4. 강북횡단선이란
+## 4. 강북횡단선(Gangbuk subway line)
 
 ```{r out.width="80%", fig.align='center', fig.cap="강북횡단선"}
 load(file="../data/line_G.RData")
@@ -163,17 +200,17 @@ loc <- c(126.95, 37.59)
 seoul <- ggmap(get_map(location=loc, zoom=12, maptype = "toner-lite", source = "stamen"))
 
 seoul + 
-  geom_path(aes(x=long, y=lat), col="brown", size =5, data=line_G) +
+  geom_path(aes(x=long, y=lat), col="brown", size=2, data=line_G) +
   geom_point(aes(x=long, y=lat, col=ifelse(Transfer==0, 'N', 'Y')), 
-             size =5, data=line_G) + labs(col = "환승가능") +
+              size=2, data=line_G) + labs(col = "환승가능") +
   scale_color_manual(values=c("green", "red")) + 
-  geom_label_repel(aes(x=long, y=lat, label=Name), fill = "black", col = "white", 
-                 alpha = 0.7, size=5, data=line_G) +
-  theme(strip.text = element_text(size=15), axis.title=element_text(size=15),
-        legend.title = element_text(size=15), legend.text = element_text(size=15),
-        axis.text = element_text(size=15)) + xlab("경도") + ylab("위도")
+  #geom_label_repel(aes(x=long, y=lat, label=Name), fill = "black", col = "white", 
+  #               alpha = 0.7, data=line_G) +
+  theme(strip.text = element_text(size=10), axis.title=element_text(size=10),
+        legend.title = element_text(size=10), legend.text = element_text(size=10),
+        axis.text = element_text(size=10)) + xlab("경도") + ylab("위도") + scale_fill_viridis_d() + scale_color_viridis_d()
   
-  #scale_y_continuous(limits = c(37.515, 37.63), expand = c(0, 0))
+#ggsave(filename="line_G.pdf", path="D:/workspace/seoulsubway_G/line_G/figure")
 ```
 
 * 2019년 2월 20일 발표한 `서울특별시 도시철도망 구축계획`에 포함(서울시. 2019)
@@ -191,11 +228,10 @@ seoul +
 2019년 2월 20일 발표한 `서울특별시 도시철도망 구축계획`을 통해 목동~청량리를 잇는 강북횡단선 등 6개 노선 신설에 대한 계획이 공개되었다. 본 논문에서는 강북횡단선에 대하여 고려할 것이다. 우선 강북횡단선을 기존 구축한 지하철 네트워크에 추가하는 과정이 필요하다.
 
 ```{r}
-load(file="../data/line_G.RData")
 load(file="../data/subway_data_G.RData")
 load(file="../data/subway_data_G_DT.RData")
 load(file="../data/transfer_station_G.RData")
-kable(line_G)
+kable(line_G, "latex")
 ```
 
 위 표와 같이 8개의 환승역이 포함된 19개의 지하철 역에 대한 지하철 네트워크를 구축하였다. 이를 반영한 네트워크를 구축하여 새로운 노선이 추가되었을 때의 최단경로를 확인할 수 있다.
@@ -237,16 +273,16 @@ for(i in 1:length(subway_route_G_0411)){
 #save(file="../data/subway_route_G_0411.RData", subway_route_G_0411)
 ```
 
-```{r, echo=TRUE}
+```{r, echo=FALSE}
 shortestpath_G(depart = "길음", arrival = "청량리")
 ```
 
 길음역에서 청량리역으로의 최단경로 함수의 결과에는 앞에서 정의한 최단경로 알고리즘과 동일하게 Info, Count, Time, 그리고 Path로 구성된다. 
 
 ```{r}
-shortestpath_G_plot <- function (departure, arrival, google_key, zoom = zoom){
+shortestpath_G_plot <- function (depart, arrival, google_key, zoom = zoom){
     register_google(key = google_key)
-    result <- shortestpath_G(departure, arrival)
+    result <- shortestpath_G(depart, arrival)
     Info <- result$Info
     index <- result %>% names %>% str_which("Path")
     Path <- result[[index[1]]]
@@ -257,16 +293,24 @@ shortestpath_G_plot <- function (departure, arrival, google_key, zoom = zoom){
     }
     meanX <- mean(as.numeric(Path$long))
     meanY <- mean(as.numeric(Path$lat))
+    Path_edit <- Path %>% filter(!duplicated(Name))
     g <- ggmap(get_map(c(meanX, meanY), zoom = zoom, maptype = "toner-lite", 
-        source = "stamen")) + geom_path(data = Path, aes(x = as.numeric(long), 
-        y = as.numeric(lat), col = Line)) + geom_label(data = Path %>% 
-        filter(!duplicated(Name)), aes(x = as.numeric(long), 
+        source = "stamen")) +
+      geom_path(data = Path_edit, aes(x = as.numeric(long), 
+        y = as.numeric(lat), size=4, col="brown")) +
+      geom_label(data = Path_edit, aes(x = as.numeric(long), 
         y = as.numeric(lat), label = Name), fill = "black", col = "white", 
-        alpha = 0.5)
+        alpha = 0.5, hjust=ifelse(Path_edit$Name=="길음", 0.1, 0))
     return(g)
 }
 
-shortestpath_G_plot(depart = "길음", arrival = "청량리", google_key = API_key, zoom = 14)
+shortestpath_G_plot(depart = "길음", arrival = "청량리", google_key = API_key, zoom = 14) +
+  scale_color_manual(values="brown") + 
+theme(strip.text = element_text(size=10), axis.title=element_text(size=10),
+        #legend.title = element_text(size=10), legend.text = element_text(size=10),
+      legend.position = "none", axis.text = element_text(size=10))  +
+  xlab("경도") + ylab("위도") + scale_fill_viridis_c()
+#ggsave(filename="line_G_path.pdf", path="D:/workspace/seoulsubway_G/line_G/figure")
 ```
 
 위 그림을 통하여 기존 지하철 경로에서는 길음(4)에서 청량리(1)로 이동 시 환승이 필요하였지만, 환승없이 빠르게 이동이 가능한 것을 확인할 수 있다. 
@@ -290,12 +334,11 @@ shortestpath_db_G <- readRDS(file="../data/shortestpath_db_G0610.RDS")
 
 신설예정노선에 포함된 신설예정역이 생기면, 새로운 이용객들이 유입될 것이다. 따라서 이를 고려하기 위하여 역 주위정보를 이용하여 승하차 인원을 예측한다. 승하차 인원 예측시, 강북횡단선 내 포함된 지하철 역과 경로가 제공되지 않는 노선(1-8호선 이외)에 포함된 지하철역들도 포함한다. 승하차 인원을 통하여 추정한 새로운 이동경로와 이용객 개별 승하차 데이터로 이동경로 데이터셋을 만들고, 강북횡단선이 포함된 최단경로 자료구조를 활용하여 수요를 확인한다. 이를 통하여 실질적으로 강북횡단선을 이용하는 이용객들의 수를 확인할 수 있다.
 
-### 5.1 역 주변정보를 이용한 승/하차 예측
+### 5.1 역 주위정보 수집을 통한 자료구축
 
 강북횡단선을 포함한 지하철 네트워크 내 포함된 지하철 역은 총 479개이다. 이 중 서울 지역에 해당하는 302개역만을 선택하여 역 주변정보를 확인한다. 역 주변정보에는 반경 500m를 기준으로 한 집계구 정보와 시설 정보 등이 있다.
 
 ```{r}
-load(file="../data/subway_data_G_DT.RData")
 station_seoul <- subway_data_G_DT %>% 
   dplyr::select(Name, lat, long) %>% 
   filter(!duplicated(Name))
@@ -326,8 +369,6 @@ station_seoul$address <- index
 station_seoul <- station_seoul[str_detect(index, "서울"),]
 ```
 
-#### 5.1.1 역별 주위정보 수집
-
 우선 역별 주위 정보 중 집계구 정보를 반영하기 위하여는 기준이 필요하다. 이때, 2017년 10월 기준 행정구역 자료를 이용하였다. 집계구 정보에는 공통적으로 `행정구역분류`가 포함되어져 있으므로 이를 기준으로 데이터를 제작한다.
 
 ```{r merge_rule, echo=FALSE, message=FALSE}
@@ -339,16 +380,18 @@ gun_gu_code <- gun_gu_code[c(-1,-2),-11]
 colnames(gun_gu_code) <- as.character(name)
 head(gun_gu_code)
 
+head(gun_gu_code) %>% kable("latex")
+
 names(gun_gu_code)[6] <- "AD_CD"
 gun_gu_code <- gun_gu_code[str_detect(gun_gu_code$AD_CD, "^11"),]
 ```
 
-#### 5.1.2 [국가공간정보포털 내 인구주택총조사 통계_인구부문(2016)](http://data.nsdi.go.kr/dataset/20171206ds00009/resource/48c14840-4aca-4779-aed0-6e218404509f?inner_span=True)
+#### 5.1.1 [국가공간정보포털 내 인구주택총조사 통계_인구부문(2016)](http://data.nsdi.go.kr/dataset/20171206ds00009/resource/48c14840-4aca-4779-aed0-6e218404509f?inner_span=True)
 
 | 변수명      | 설명             |
 |-------------|------------------|
 | youngage    | 0~10세 인구      |
-| teenage     | 10대 인구        |
+| teenage     | 10~20대 인구     |
 | middleage1  | 20~30대 인구     |
 | middleage2  | 40~50대 인구     |
 | oldage      | 60세 이상 인구   |
@@ -397,7 +440,7 @@ glimpse(ppl_var_handle)
 
 지하철 승하차 인원의 수를 예측하는 데 있어서 가장 중요한 것은 지하철 역 주위에 거주하고 있는 인구 수 일 것이다. 이는 실질적으로 지하철을 이용할 가능성이 있는 인원의 수이기 때문이다. 집계구 자료에는 행정구역분류 별 5세를 기준으로 인구 수에 대한 수치가 반영되어져 있다. 이를 위 표와 같이 총 5개의 범주로 나누었다. 
 
-#### 5.1.3 [국가공간정보포털 내 인구주택총조사 통계_사업체부문(2016)](http://data.nsdi.go.kr/dataset/20171206ds00006/resource/4f363f8b-d94b-4c66-a633-b5ea1989bf9d)
+#### 5.1.2 [국가공간정보포털 내 인구주택총조사 통계_사업체부문(2016)](http://data.nsdi.go.kr/dataset/20171206ds00006/resource/4f363f8b-d94b-4c66-a633-b5ea1989bf9d)
 
 | 사업체 코드        | 분류                                       |
 |--------------------|--------------------------------------------|
@@ -449,7 +492,7 @@ glimpse(company_handle)
 ```
 
 
-#### 5.1.4 [국가공간정보포털 내 인구주택총조사 통계_가구부분(2016)](http://data.nsdi.go.kr/dataset/20171206ds00007/resource/88154502-eaeb-4fed-b82c-359d3ad0ed27)
+#### 5.1.3 [국가공간정보포털 내 인구주택총조사 통계_가구부분(2016)](http://data.nsdi.go.kr/dataset/20171206ds00007/resource/88154502-eaeb-4fed-b82c-359d3ad0ed27)
 
 | 변수명        | 설명                       |
 |---------------|----------------------------|
@@ -458,7 +501,7 @@ glimpse(company_handle)
 | gagu_gen2     | 2세대 가구 수              |
 | gagu_gen3     | 3세대 가구 수              |
 | gagu_alone    | 1인 가구 수                |
-| gagu_etc      | 4세대 가구, 비혈연가구 수  |
+| gagu_etc      | 4세대 가구 수 및 비혈연가구 수  |
 
 ```{r gagu, echo=FALSE, warning=FALSE, message=FALSE, warning=FALSE}
 gagu <- fread(file="../Z_SOP_OA/gagu_tot_2015.txt", sep="^")
@@ -512,7 +555,7 @@ glimpse(gagu_merge)
 ```
 
 
-#### 5.1.5 [다음API](https://developers.kakao.com/docs/restapi/tool)를 이용하여 6가지 변수 선정(`대형마트`, `학교`, `학원`, `문화시설`, `관광명소`, `병원`)
+#### 5.1.4 [다음API](https://developers.kakao.com/docs/restapi/tool)를 이용하여 6가지 변수 선정(`대형마트`, `학교`, `학원`, `문화시설`, `관광명소`, `병원`)
 
 서울시 내 지하철 302개 역에 대하여 반경 500m 이내 `대형마트`, `학교`, `학원`, `문화시설`, `관광명소`, `병원` 시설 수를 변수로 추가하였다. 이는 다음 API를 통하여 구하였다.
 
@@ -570,12 +613,13 @@ station_seoul_daum <- fread("../data/station_seoul_daum.csv", encoding = "UTF-8"
 glimpse(station_seoul_daum)
 ```
 
-#### 5.1.6 버스정류장 위치데이터 이용 반경 500m 이내 버스정류장 수
+#### 5.1.5 버스정류장 위치데이터 이용 반경 500m 이내 버스정류장 수
 
 지하철 승/하차 인원 수는 역 주위 버스정류장의 수와 밀접한 관련이 있다. 왜냐하면 버스와 지하철 간 환승시스템으로 인하여 지하철과 버스를 같이 이용하는 경우가 많기 때문이다. 버스정류장 위치데이터는 공공데이터 포털에 요청하여 얻을 수 있었다. 이를 이용하여 수도권 내 11000여 곳의 버스정류장과 302개의 지하철역 사이의 거리행렬 구하여 반경 500m 이내의 버스정류장 수를 확인하였다. 
 
 ```{r use dist matrix to get bus station count, echo=FALSE, eval=FALSE}
 bus_station <- fread(file="../data/bus_station_longlat.csv", encoding="UTF-8")
+bus_station %>% head() %>% kable("latex")
 
 bus_station <- bus_station %>% 
   dplyr::select(정류소명, X좌표, Y좌표) %>%
@@ -618,7 +662,7 @@ glimpse(station_seoul_bus)
 ```
 
 
-#### 5.1.7 지하철 반경 500m 이내 용도지역 점수
+#### 5.1.6 지하철 반경 500m 이내 용도지역 점수
 
 용도지역이란 '토지의 이용 및 건축물의 용도,  건폐율, 용적률, 높이 등을 제한함으로써 토지를 경제적  효율적으로 이용하고 공공복리의 증진을 도모하기 위하여 서로 중복되지 아니하게 도시관리계획으로 결정하는 지역`을 말한다. 용도지역 종류는 서울시와 같은 도시지역에서는 크게 주거지역, 상업지역, 공업지역, 녹지지역으로 구분하고 있으며, 개념은 다음과 같다.
 
@@ -668,10 +712,10 @@ gridpoint_usz$type <- ifelse(str_detect(gridpoint_usz$type, "상업"),
 gridpoint_usz$type <- ifelse(str_detect(gridpoint_usz$type, "공업"),
                                  "공업", as.character(gridpoint_usz$type))
 gridpoint_usz$type <- ifelse(str_detect(gridpoint_usz$type, "자연녹지지역"),
-                                 "etc", as.character(gridpoint_usz$type))
+                                 "기타", as.character(gridpoint_usz$type))
 gridpoint_usz$type <- ifelse(str_detect(gridpoint_usz$type, "기타사업"),
-                                 "etc", as.character(gridpoint_usz$type))
-gridpoint_usz$type <- ifelse(str_detect(gridpoint_usz$type, "도시계획 시설|용도지역|토지구획정리사업"), "etc", as.character(gridpoint_usz$type))
+                                 "기타", as.character(gridpoint_usz$type))
+gridpoint_usz$type <- ifelse(str_detect(gridpoint_usz$type, "도시계획 시설|용도지역|토지구획정리사업"), "기타", as.character(gridpoint_usz$type))
 ## check ratio about usezoning type
 # table(gridpoint_usz$type)
 
@@ -721,7 +765,8 @@ find_usezoning_circle <- function(long_rec, lat_rec, sd_select){
     scale_x_discrete(breaks=c(as.numeric(seq(min(latcut_result$long), 
                                   max(latcut_result$long), 0.0002)))) + 
     scale_y_discrete(breaks=c(as.numeric(seq(min(latcut_result$lat), 
-                                  max(latcut_result$lat), 0.0002))))
+                                  max(latcut_result$lat), 0.0002)))) +
+    theme_bw()
 
   n_point <- nrow(latcut_result)
   result_list <- list(table = result, n = n_point, plot = gg)
@@ -730,11 +775,58 @@ find_usezoning_circle <- function(long_rec, lat_rec, sd_select){
 
 ```
 
-```{r, echo=TRUE, fig.width=5, fig.height=3, fig.align='center'}
+```{r, echo=FALSE, fig.width=5, fig.height=3, fig.align='center'}
 station_seoul[21,]
 find_usezoning_circle(long_rec = as.numeric(station_seoul$long[21]),
                       lat_rec = as.numeric(station_seoul$lat[21]),
-                      sd_select = 500)
+                      sd_select = 500) 
+
+long_rec = as.numeric(station_seoul$long[21])
+lat_rec = as.numeric(station_seoul$lat[21])
+sd_select <- 500
+longcut <- gridpoint_usz[which(gridpoint_usz$long <= long_rec + 0.00566 &
+                               gridpoint_usz$long >= long_rec -0.00566),]
+### long 기준으로 0.00566정도는 좌우로 약 500m 거리의 지점을 의미합니다.
+latcut <- longcut[which(longcut$lat <= lat_rec + 0.00449 &
+                        longcut$lat >= lat_rec - 0.00449),]
+### lat 기준으로 0.00449정도는 상하로 약 500m 거리의 지점을 의미합니다.
+### 즉, 역 기준으로 1km의 정사각형 구간으로 공간을 한정합니다.
+### 이후 distHaversine 수식을 이용하여 500m 내에 포함되는 spot만 간추려냅니다.
+dist <- c()
+for(i in 1:nrow(latcut)){
+  dist[i] <- distHaversine(c(as.numeric(latcut$long[i]),
+                             as.numeric(latcut$lat[i])),
+                             c(long_rec, lat_rec))
+}
+latcut_result <- latcut[which(dist <= 500 & dist !=0),]
+latcut_result$dist <- dist[which(dist <= 500 & dist !=0)]
+if(length(dist)==1){
+  latcut_result <- latcut
+}
+latcut_result$weight_sd <- 
+  gausskernel_Haversine(origin = c(long_rec, lat_rec),
+                        mat = data.matrix(latcut_result[,c("long","lat")]),
+                        sigma = sd_select^2)[,1]
+if(length(dist)==1){
+  latcut_result$weight_sd <- 0
+}
+
+latcut_result <- latcut_result %>%
+  mutate(long = as.numeric(long), lat = as.numeric(lat)) %>% 
+  mutate(type=ifelse(type=="etc", "기타", type))
+
+seoulstation_fty <- usezoning %>% fortify() %>% 
+  filter(long<=126.979, long > 126.965, lat <= 37.56, lat >37.548)  
+
+ggplot() + 
+  geom_polygon(aes(x=long, y=lat, group=group), fill = "white", 
+               col="black", alpha= 0.2, data=seoulstation_fty) + 
+  geom_point(data=latcut_result, aes(x=long, y=lat, col=type, size=weight_sd)) + 
+  geom_point(aes(x=126.9726, y=37.55465), size=3, col="red") +
+  theme_bw() +xlab("경도") + ylab("위도") + labs(col="용도지역", size="가중치") +
+  scale_fill_viridis_c() + scale_color_viridis_d() + coord_map()
+
+#ggsave(filename="usz_seoul.pdf", path="D:/workspace/seoulsubway_G/line_G/figure")
 ```
 
 ```{r echo=FALSE, eval=FALSE}
@@ -778,11 +870,11 @@ gungu_info <- gagu_merge %>%
   left_join(gun_gu_code)
 ```
 
-#### 5.1.8 지하철 역별 노선 수
+#### 5.1.7 지하철 역별 노선 수
 
 하나의 지하철역에 대하여 2개 이상의 노선이 이용가능한 환승역의 경우, 외부인구유입이 더 많을 것이다. 따라서 이를 고려하기 위하여 모든 지하철 역에 대하여 이용가능한 노선의 수를 반영하였다.
 
-#### 5.1.9 지하철 역 별 주위 정보 반영방법
+#### 5.1.8 지하철 역 별 주위 정보 반영방법
 
 서울시 행정구역 shape 파일을 이용하여 앞과 동일하게 100m 간격으로 점을 찍는 과정을 통해 grid를 생성하였다. 그 후 302개의 역에 대하여 반경 500m에 속하는 행정구역을 확인하고, 해당 행정구역들의 grid의 수를 이용하여 가중평균을 계산하였다. 
 
@@ -791,6 +883,11 @@ seoul <- readOGR(dsn="../seoulshp", layer="TL_SCCO_EMD",
                  encoding = "UTF-8", verbose = FALSE)
 seoul <- seoul[str_detect(seoul@data$EMD_CD, "^11"),]
 seoul <- spTransform(seoul, CRS("+proj=longlat +datum=NAD83"))
+
+seoul_fty <- fortify(seoul, region="EMD_CD")
+seoul_fty %>% ggplot(aes(x=long, y=lat, group=group)) + geom_polygon(fill='white', color='black') + theme_bw() + xlab("경도") + ylab("위도")
+#ggsave(filename="seoul.pdf", path="D:/workspace/seoulsubway_G/line_G/figure")
+
 
 ## set cellsize : set 100m(almost) distance for grid
 cs <- c(0.00092, 0.0009)
@@ -819,6 +916,7 @@ gun_gu_code2$법정동코드 <- str_sub(gun_gu_code2$법정동코드, 1,8)
 gun_gu_code2$code <- gun_gu_code2$법정동코드
 gridpoint_seoul <- left_join(gridpoint_seoul, gun_gu_code2)
 
+#gridpoint_seoul %>% ggplot(aes(x=long, y=lat))+ geom_point()
 ## make function
 find_emd_circle <- function(long_rec, lat_rec){
   longcut <- gridpoint_seoul[which(gridpoint_seoul$long <= long_rec + 0.00566 &
@@ -846,23 +944,57 @@ find_emd_circle <- function(long_rec, lat_rec){
     scale_x_discrete(breaks=c(as.numeric(seq(min(latcut_result$long), 
                                   max(latcut_result$long), 0.0002)))) + 
     scale_y_discrete(breaks=c(as.numeric(seq(min(latcut_result$lat), 
-                                  max(latcut_result$lat), 0.0002))))
+                                  max(latcut_result$lat), 0.0002)))) +
+    theme_bw()
   result_list <- list(table = result, plot = gg)
   result_list
 }
 ```
 
-```{r, echo=TRUE, fig.width=5, fig.height=3, fig.align='center'}
+```{r, echo=FALSE, fig.width=5, fig.height=3, fig.align='center'}
 station_seoul[21,]
 find_emd_circle(long_rec = station_seoul$long[21], 
                 lat_rec = station_seoul$lat[21])
 
-station_seoul[33,]
-find_emd_circle(long_rec = station_seoul$long[33], 
-                lat_rec = station_seoul$lat[33])
-```
+long_rec <- station_seoul$long[21]
+lat_rec = station_seoul$lat[21]
+longcut <- gridpoint_seoul[which(gridpoint_seoul$long <= long_rec + 0.00566 &
+                                 gridpoint_seoul$long >= long_rec -0.00566),]
+  ### long 기준으로 0.00566정도는 좌우로 약 500m 거리의 지점을 의미합니다.
+latcut <- longcut[which(longcut$lat <= lat_rec + 0.00449 &
+                        longcut$lat >= lat_rec - 0.00449),]
+### lat 기준으로 0.00449정도는 상하로 약 500m 거리의 지점을 의미합니다.
+### 즉, 역 기준으로 1km의 정사각형 구간으로 공간을 한정합니다.
+### 이후 distHaversine 수식을 이용하여 500m 내에 포함되는 spot만 간추려냅니다.
+dist <- c()
+for(i in 1:nrow(latcut)){
+  dist[i] <- distHaversine(c(as.numeric(latcut$long[i]),
+                           as.numeric(latcut$lat[i])),
+                           c(long_rec, lat_rec))
+}
+latcut_result <- latcut[which(dist <= 500),] %>%
+  mutate(long = as.numeric(long), lat = as.numeric(lat))
 
-```{r echo=FALSE, eval=FALSE}
+result <- latcut_result %>% 
+  dplyr::select(AD_CD) %>%
+  group_by(AD_CD)%>%
+  summarise(ratio=n()) %>%
+  spread(AD_CD, ratio)
+  
+seoulstation_fty <- seoul_fty %>% 
+  filter(long<=126.98, long > 126.965, lat <= 37.559, lat >37.549)  
+
+ggplot() + 
+  geom_polygon(aes(x=long, y=lat, group=group), fill='white', color='black', data=seoulstation_fty) + 
+  geom_point(aes(x=126.9726, y=37.55465), size=3, col="red") +
+  geom_point(data=latcut_result, aes(x=long, y=lat, col=AD_CD)) + theme_bw() + labs(col = "행정구역분류") + xlab("경도") + ylab("위도") + scale_fill_viridis_c() + scale_color_viridis_d() + coord_map()
+#install.packages("mapproj")
+
+#ggsave(filename="seoul_emd.pdf", path="D:/workspace/seoulsubway_G/line_G/figure")
+```
+O
+
+```{r echo=FALSE}
 get_mean_grid <- data.frame(matrix(0, 302,26))
 for(i in 1:302){
   result <- find_emd_circle(long_rec = station_seoul$long[i], 
@@ -884,12 +1016,15 @@ result <- get_mean_grid
 result <- cbind(station=station_seoul$station, result)
 
 station_seoul_info <- station_seoul %>% 
-  left_join(result)
+  left_join(result) %>% separate(address, c("si", "address_gu", "dong")) %>% 
+  dplyr::select(-si, -dong)
+
 ```
 
 ```{r load data hidden2, include=FALSE}
 #save(file="../data/station_seoul_info.RData", station_seoul_info, gungu_info)
 load(file="../data/station_seoul_info.RData")
+#save(file="../data/fit_temp.RData", station_seoul_info, gungu_info, ridership_mean_infoset_train)
 ```
 
 ```{r}
@@ -908,22 +1043,22 @@ station_seoul_info$line_available <- line_available
 ```
 
 
-#### 5.1.10 최종데이터 구조 
+#### 5.1.9 최종데이터 구조 
 
 1> 302개 지하철역을 대상으로 41개의 주위정보 데이터
 
-  * 지하철 위치정보 : lat, long, address
+  * 지하철 위치정보 : lat, long, address_gu
   
   * 500m 반경 시설정보 : market_store, school, academy, cultural_facility, attraction, hospital, bus_stop, line_available
   
-  * 5가지 용도지역 비율 : usz_sang, usz_ju, usz_gong, usz_etc
+  * 4가지 용도지역 점수 : usz_sang, usz_ju, usz_gong, usz_etc
   
-  * 가구 수 : avg_gagu_ppl, gagu_gen1, gagu_gen2, gagu_gen3, gagu_alone, gagu_etc
+  * 가구부문 : avg_gagu_ppl, gagu_gen1, gagu_gen2, gagu_gen3, gagu_alone, gagu_etc
   
-  * 직종별 종사자 수 : cp_bnu_003, cp_bnu_006, cp_bnu_007, cp_bnu_008, cp_bnu_009, cp_bnu_010, cp_bnu_011, cp_bnu_012, cp_bnu_013,
+  * 사업체부문 : cp_bnu_003, cp_bnu_006, cp_bnu_007, cp_bnu_008, cp_bnu_009, cp_bnu_010, cp_bnu_011, cp_bnu_012, cp_bnu_013,
   cp_bnu_014, cp_bnu_015, cp_bnu_016, cp_bnu_017, cp_bnu_018, cp_bnu_019
   
-  * 인구 수 : youngage, teenage, middleage1, middleage2, oldage
+  * 인구부문 : youngage, teenage, middleage1, middleage2, oldage
   
 ```{r}
 glimpse(station_seoul_info)
@@ -986,17 +1121,22 @@ ridership_04[is.na(ridership_04)] <- 0
 Date_format <- data.frame(Date=unique(ridership_04$Date),
 Day=c(rep(c("Sun", "Mon", "Tue", "Wed", "Thr", "Fri", "Sat"),4), "Sun", "Mon"))
 
-ridership_04_mean <- ridership_04 %>% 
+ridership_04_set <- ridership_04 %>% 
   gather(station, count, colnames(ridership_04)[-1:-3]) %>% 
-  left_join(Date_format) %>%
-  group_by(Day, Time, on_off, station) %>% 
-  summarise(mean_count = mean(count))
+  left_join(Date_format) 
+#%>% group_by(Day, Time, on_off, station) %>% summarise(count=mean(count, na.rm=T) %>% ceiling)
 
-ridership_04_mean
-
-ridership_mean_infoset <- ridership_04_mean %>% 
+ridership_mean_infoset <- ridership_04_set %>% 
   left_join(station_seoul_info) %>% 
   na.omit()
+
+ridership_mean_infoset_train <- ridership_mean_infoset %>% 
+  group_by(Day, Time, station, on_off) %>% 
+  summarise(mean_count = mean(count)) %>%
+  left_join(station_seoul_info) %>% ungroup %>% 
+  mutate(Time = as.numeric(Time), Day = as.factor(Day), on_off = as.factor(on_off)) %>% 
+  data.frame()
+
 ```
 
 
@@ -1004,7 +1144,71 @@ ridership_mean_infoset <- ridership_04_mean %>%
 
 이용객 개별 승하차 데이터는 1-8호선에 속한 지하철역만 포함하기에 강북횡단선 내 신설역을 포함한 서울시 내 지하철역 302개 중 222개의 승/하차 인원 수만 확인 가능하다. 따라서 222개의 지하철역에 대한 승/하차 인원 수를 통하여 나머지 80개 역에 대한 승/하차 값을 알고리즘을 통하여 예측한다.
 
-1. `predict_count_rf(day_choose, time_choose, on_off_choose)` 
+#### 5.2.1 탐색적 자료분석 
+
+탐색적자료분석은 승하차 인원수가 제공되는 강북횡단선 내 6개의 지하철역으로 진행한다.
+
+```{r}
+## 평균 카운트 // 요일별 시간대별 평균 승하차인원 수
+ridership_mean_infoset %>% dplyr::select(-Date) %>% group_by(Day, Time, on_off) %>%
+  summarise(mean_count=mean(count)) %>%
+  mutate(on_off = factor(on_off, levels = c("on", "off"),
+                         labels = c("승차", "하차"))) %>% 
+  ggplot(aes(x=as.numeric(Time), y=mean_count)) + 
+  geom_bar(stat="identity") + 
+  facet_grid(factor(Day, levels=c("Sun", "Mon", "Tue", "Wed", "Thr", "Fri", "Sat"),
+                    labels=c("일", "월", "화", "수", "목", "금", "토"))~on_off) +
+  ylab("평균 이용객 수") + xlab("시간") + theme_bw()
+# ggsave(filename="day_time.pdf", path="D:/workspace/seoulsubway_G/line_G/figure")
+
+ridership_mean_infoset %>% group_by(Date, Day, on_off) %>%
+  summarise(mean_count=sum(count)) %>% 
+  group_by(Day, on_off) %>% summarise(mean_count = mean(mean_count)) %>% 
+  ungroup %>% 
+  mutate(Day = factor(Day, levels=c("Sun", "Mon", "Tue", "Wed", "Thr", "Fri", "Sat"),
+                    labels=c("일", "월", "화", "수", "목", "금", "토")),
+         on_off = factor(on_off, levels = c("on", "off"),
+                         labels = c("승차", "하차"))) %>% 
+  ggplot(aes(x=Day, y=mean_count)) + 
+  geom_bar(stat="identity") + ylab("평균 이용객 수") + xlab("요일") + theme_bw() 
+
+# ggsave(filename="day_count.pdf", path="D:/workspace/seoulsubway_G/line_G/figure")
+
+ridership_mean_infoset_train <- ridership_mean_infoset %>% 
+  group_by(Day, Time, station, on_off) %>% 
+  summarise(mean_count = mean(count)) %>% 
+  left_join(station_seoul_info) %>% ungroup %>% 
+  mutate(Time = as.numeric(Time), Day = as.factor(Day), on_off = as.factor(on_off)) %>% 
+  dplyr::select(-station, -address) %>%  data.frame()
+ridership_mean_infoset_train_select <- ridership_mean_infoset_train %>% filter(Time == "8", Day=="Mon", on_off =="on") %>% mutate(key = "승차")
+ridership_mean_infoset_train_select2 <- ridership_mean_infoset_train %>% filter(Time == "8", Day=="Mon", on_off =="off") %>% mutate(key = "하차")
+ridership_mean_infoset_train_select3 <- ridership_mean_infoset_train %>% filter(Time == "18", Day=="Mon", on_off =="on") %>% mutate(key = "승차")
+ridership_mean_infoset_train_select4 <- ridership_mean_infoset_train %>% filter(Time == "18", Day=="Mon", on_off =="off") %>% mutate(key = "하차")
+
+ridership_mean_infoset_train_select_tot <-
+  rbind(ridership_mean_infoset_train_select, ridership_mean_infoset_train_select2,
+        ridership_mean_infoset_train_select3, ridership_mean_infoset_train_select4) %>% 
+  mutate(type = factor(key, levels=c("승차", "하차")),
+         Time2 = paste0(Time, "시"))
+
+ggmap(get_map(location = c(127, 37.55047), zoom = 11)) + 
+    geom_point(data=ridership_mean_infoset_train_select_tot, 
+               aes(x=long, y=lat, col=mean_count), size = 0.5) + facet_grid(Time2~type) +
+  labs(col="평균 이용객 수") + xlab("경도") + ylab("위도") + scale_color_viridis_c() +
+  theme(strip.text = element_text(size=7), axis.title=element_text(size=7),
+        axis.text = element_text(size=7), legend.title = element_text(size=7),
+        legend.text = element_text(size=7), legend.key.size = unit(0.5, "cm"),
+        axis.text.x = element_text(angle = 90)) + theme_bw()
+
+# ggsave(filename="monday_8.pdf", path="D:/workspace/seoulsubway_G/line_G/figure")
+
+```
+
+
+
+
+#### 5.2.2 랜덤포레스트
+`predict_count_rf(day_choose, time_choose, on_off_choose)` 
 
 랜덤포레스트 알고리즘을 적용한 함수를 제작하여 요일, 시간대 그리고 승/하차를 선택하면 그 시점의 이용객 승하차 데이터베이스를 통하여 수요값을 예측한다.
 
@@ -1021,126 +1225,166 @@ ridership_mean_infoset <- ridership_04_mean %>%
     2. `ntree`란 나무의 개수로 랜덤포레스트에서 500개의 개별 의사결정나무를 생성하고 비교할 때 사용된다.
     
 ```{r, eval=FALSE}
-#rsq.rpart(rpart_fit)
+library(tidyverse)
+library(caret)
+library(randomForest)
+load("/home/students/kson/data/fit_temp.RData")
+
+ridership_mean_infoset_train <- ridership_mean_infoset_train %>% mutate(address_gu = factor(address_gu))
+
 rf_fit <- randomForest(mean_count ~. ,
                        data = ridership_mean_infoset_train,
-                       mtry=floor(43/3), ntree=50)
+                       mtry=floor(44/3), ntree=200)
 
-# save(file="../data/rf_fit.RData", rf_fit)
+bagg_fit <- randomForest(mean_count ~. ,
+                         data = ridership_mean_infoset_train,
+                         mtry=44, ntree=200)
+
+#save(file="../data/rf_fit.RData", rf_fit)
+
+fitControl <- trainControl(method = "repeatedcv", number = 10, repeats = 1)
+rf_fit <- train(mean_count ~ ., data = ridership_mean_infoset_train, method = "rf", trControl = fitControl, verbose = F)
 ```
 
 ```{r}
+ridership_mean_infoset_train <- ridership_mean_infoset_train %>% mutate_if(is.character, as.factor)
 station_predict <- setdiff(station_seoul_info$station, ridership_mean_infoset$station)
-
-ridership_mean_infoset_train <- ridership_mean_infoset %>% 
-  ungroup %>% dplyr::select(-station, -address) %>% 
-  mutate(Time = as.numeric(Time), on_off = as.factor(on_off))
-
-rpart.ct <- rpart.control(xval=10,cp=0.0001)
-rpart_fit <- rpart(formula=mean_count~., 
-                   data=ridership_mean_infoset_train, 
-                   method="anova", control=rpart.ct)
-
-load(file="../data/rf_fit.RData")
-
-randomForest::varImpPlot(rf_fit)
-
-day_choose <- "Fri" ; time_choose <- "20" ; on_off_choose <- "off"
-new_data <- station_seoul_info %>% 
-  filter(station %in% station_predict) %>%
-  dplyr::select(-station,  -address) %>% 
-  mutate(Day = factor(day_choose, levels=levels(ridership_mean_infoset_train$Day)), 
-         Time = time_choose, on_off = factor(on_off_choose, levels(ridership_mean_infoset_train$on_off))) %>% 
-  mutate(Time = as.numeric(Time), on_off = as.factor(on_off)) %>% 
-  dplyr::select(colnames(ridership_mean_infoset_train)[-4])
-
-rpart_predict <- station_seoul_info %>% 
-  filter(station %in% station_predict) %>% 
-  mutate(pred = predict(rpart_fit, new_data))
- 
-rf_predict <- station_seoul_info %>% 
-  filter(station %in% station_predict) %>% 
-  mutate(pred = predict(rf_fit, new_data))
-
-plot(rpart_predict$pred, rf_predict$pred)
 ```
 
+```{r, eval=FALSE}
+library(tidyverse)
+library(caret)
+library(randomForest)
+library(parallel)
+library(doParallel)
+library(gbm)
+
+load("/home/students/kson/data/fit_temp.RData")
+set.seed(1234)
+
+ridership_mean_infoset_train <- ridership_mean_infoset_train %>% 
+  mutate_if(is.character, as.factor) %>% mutate(mean_count = log(mean_count + 1))
+
+fitControl <- trainControl(method = "cv", number = 5, trim = TRUE)
+cart_Grid <- expand.grid(cp=c(0.001))
+fit_cart <- train(mean_count~., data=ridership_mean_infoset_train, 
+                  method = 'rpart', trControl=fitControl, metric='RMSE',
+                  maximize=FALSE, tuneGrid = cart_Grid)
+
+save(file="/home/students/kson/data/fit_cart_log.RData", fit_cart)
+
+gbm_Grid <- expand.grid(n.trees = c(1500, 2000), 
+                        interaction.depth = c(4, 5, 6),
+                        shrinkage = c(0.01),
+                        n.minobsinnode = 10)
+fit_gbm <- train(mean_count~., data=ridership_mean_infoset_train,
+                 method = 'gbm', trControl=fitControl, 
+                 tuneGrid=gbm_Grid, metric='RMSE',maximize=FALSE)
+
+gbm_Grid2 <- expand.grid(n.trees = c(1200), 
+                        interaction.depth = c(4,5,6),
+                        shrinkage = c(0.01, 0.05, 0.1),
+                        n.minobsinnode = 10)
+fit_gbm_grid <- train(mean_count~., data=ridership_mean_infoset_train,
+                 method = 'gbm', trControl=fitControl, 
+                 tuneGrid=gbm_Grid2, metric='RMSE',maximize=FALSE)
+
+
+save(file="/home/students/kson/data/fit_gbm_log.RData", fit_gbm)
+
+fit_treebag <- train(mean_count~., data=ridership_mean_infoset_train,
+                 method = 'treebag', trControl=fitControl, nbagg = 500)
+
+rf_Grid <- expand.grid(mtry = c(floor(44/3)))
+fit_rf <- train(mean_count~., data=ridership_mean_infoset_train,
+                method = 'rf', trControl=fitControl, ntree = 500,
+                tuneGrid=rf_Grid,metric='RMSE')
+
+save(file="/home/students/kson/data/fit_rf_log.RData", fit_rf)
+```
+
+
 ```{r}
-predict_count_rf <- function(day_choose = "Fri", time_choose = "20", on_off_choose = "off"){
+#load(file="../data/fit_cart.RData")
+load(file="../data/fit_gbm_0708.RData")
+#load(file="../data/fit_temp.RData")
+library(caret)
+library(gbm)
+
+varImp(fit_gbm)$importance %>% 
+  as.data.frame() %>%
+  rownames_to_column() %>%
+  arrange(desc(Overall)) %>%
+  head(20) %>% 
+  mutate(변수명 = forcats::fct_inorder(rowname ),
+            중요도 = Overall) %>% ggplot() +
+    geom_col(aes(x = 변수명, y = 중요도)) + coord_flip() +
+    theme_bw()
+
+#ggsave(filename="varimpplot_log.pdf", path="D:/workspace/seoulsubway_G/line_G/figure")
+```
+
+
+```{r}
+predict_count_gbm <- function(day_choose = "Fri", time_choose = "20", on_off_choose = "off"){
   station_predict <- setdiff(station_seoul_info$station,
                              ridership_mean_infoset$station)
   new_data <- station_seoul_info %>% 
     filter(station %in% station_predict) %>%
-    dplyr::select(-station, -address) %>% 
+    dplyr::select(-station) %>% 
     mutate(Day = factor(day_choose, levels=levels(ridership_mean_infoset_train$Day)), 
            Time = time_choose, on_off = factor(on_off_choose, levels(ridership_mean_infoset_train$on_off))) %>% 
     mutate(Time = as.numeric(Time), on_off = as.factor(on_off)) %>% 
-    dplyr::select(colnames(ridership_mean_infoset_train)[-4])
+    dplyr::select(colnames(ridership_mean_infoset_train)[c(-3,-5)])
 
   station_seoul_info %>% 
     filter(station %in% station_predict) %>% 
-    mutate(mean_count = predict(rf_fit, new_data)) %>% 
+    mutate(count = predict(fit_gbm, new_data)) %>% 
     mutate(Day = day_choose, Time = time_choose, on_off = on_off_choose) %>% 
     mutate(Time = as.numeric(Time), on_off = as.factor(on_off)) %>% 
-    dplyr::select(-address) %>% 
-    rbind(ridership_mean_infoset %>% ungroup %>%
-            dplyr::select(-address) %>% 
+    rbind(ridership_mean_infoset_train %>% ungroup %>%
+            rename(count=mean_count) %>% 
             filter(Time == time_choose, Day == day_choose, on_off == on_off_choose) %>% 
             mutate(Time = as.numeric(Time), on_off = as.factor(on_off))) %>% 
     as_tibble()
 }
 
-predict_count_rpart <- function(day_choose = "Fri", time_choose = "20", on_off_choose = "off"){
-  station_predict <- setdiff(station_seoul_info$station,
-                             ridership_mean_infoset$station)
-  new_data <- station_seoul_info %>% 
-    filter(station %in% station_predict) %>%
-    dplyr::select(-station,  -address) %>% 
-    mutate(Day = factor(day_choose, levels=levels(ridership_mean_infoset_train$Day)), 
-           Time = time_choose, on_off = factor(on_off_choose, levels(ridership_mean_infoset_train$on_off))) %>% 
-    mutate(Time = as.numeric(Time), on_off = as.factor(on_off)) %>% 
-    dplyr::select(colnames(ridership_mean_infoset_train)[-4])
-
-  station_seoul_info %>% ungroup %>% 
-    filter(station %in% station_predict) %>% 
-    mutate(mean_count = predict(rpart_fit, new_data)) %>% 
-    mutate(Day = day_choose, Time = time_choose, on_off = on_off_choose) %>% 
-    mutate(Time = as.numeric(Time), on_off = as.factor(on_off)) %>% 
-    dplyr::select( -address) %>% 
-    rbind(ridership_mean_infoset %>% ungroup %>%
-            dplyr::select( -address) %>% 
-            filter(Time == time_choose, Day == day_choose, on_off == on_off_choose) %>% 
-            mutate(Time = as.numeric(Time), on_off = as.factor(on_off))) %>% 
-    as_tibble()
-}
-
-predict_count_rf(day_choose = "Fri", time_choose = "20", on_off_choose = "off")
-predict_count_rpart(day_choose = "Fri", time_choose = "20", on_off_choose = "off")
+predict_count_gbm(day_choose = "Fri", time_choose = "20", 
+                  on_off_choose = "off") %>%
+  dplyr::select(station, count)
 ```
+
 
 ### 5.3 몬테카를로 샘플링
 
 * 강북횡단선이 포함된 80개의 지하철역에 대하여 예측된 승하차 수요를 통하여 몬테카를로 샘플링을 시행함
 
 ```{r}
-on_fri_15 <- predict_count_rf(day_choose = "Fri", time_choose = "15", on_off_choose = "on")
-off_fri_15 <- predict_count_rf(day_choose = "Fri", time_choose = "15", on_off_choose = "off")
+on_fri_15 <- predict_count_gbm(day_choose = "Fri", time_choose = "15", on_off_choose = "on")
+off_fri_15 <- predict_count_gbm(day_choose = "Fri", time_choose = "15", on_off_choose = "off")
 
 MC_sampling <- function(input_data, on_off_choose){
   result_generate <- list()
   nms_get <- setdiff(station_seoul_info$station, ridership_mean_infoset$station)
+  input_data <- input_data %>% mutate(count = ifelse(count<0, 0, count))
   for(i in 1:length(nms_get)){
     nrow_i <- input_data %>% filter(station==nms_get[i]) %>%
-      dplyr::select(mean_count) %>% t() %>% as.numeric() %>% round()
-    result_generate[[nms_get[i]]] <- as_tibble(matrix(0, nrow_i, 3))
-    colnames(result_generate[[nms_get[i]]]) <- c("time", on_off_choose, 'generate')
-    result_generate[[nms_get[i]]]$time <- input_data$Time[1]
-    result_generate[[nms_get[i]]][,on_off_choose] <- nms_get[i]
-    tot_except_i <- sum(input_data$mean_count[input_data$station != nms_get[i]] %>% round())
-    generate <- sample(x = input_data$station[input_data$station != nms_get[i]], replace =TRUE, 
-                       size = input_data$mean_count[input_data$station == nms_get[i]] %>% round(), 
-                       prob = input_data$mean_count[input_data$station != nms_get[i]] %>% round()/tot_except_i)
-    result_generate[[nms_get[i]]]$generate <- generate
+      dplyr::select(count) %>% t() %>% as.numeric() %>% ceiling()
+    if(nrow_i > 0){
+      result_generate[[nms_get[i]]] <- data.frame(matrix(0, nrow_i, 3))
+      colnames(result_generate[[nms_get[i]]]) <- c("time", on_off_choose, 'generate')
+      result_generate[[nms_get[i]]]$time <- input_data$Time[1]
+      result_generate[[nms_get[i]]][,on_off_choose] <- nms_get[i]
+      tot_except_i <- sum(input_data$count[input_data$station != nms_get[i]] %>%
+                            ceiling())
+      generate <- sample(x = input_data$station[input_data$station != nms_get[i]],
+                         replace =TRUE, 
+                         size = input_data$count[input_data$station == nms_get[i]] %>%
+                         ceiling(), 
+                         prob = input_data$count[input_data$station != nms_get[i]] %>%
+                         ceiling()/tot_except_i)
+      result_generate[[nms_get[i]]]$generate <- generate
+    }
   }
   gen_result <- result_generate[[1]]
   for(i in 2:length(result_generate)){
@@ -1156,12 +1400,15 @@ MC_sampling <- function(input_data, on_off_choose){
     group_by(time, day, depart, arrival, set) %>% summarise(count=n()) %>% ungroup()
 }
 
-MC_sampling(on_fri_15, "on") 
+on_Sun_0 <- predict_count_gbm(day_choose = "Sun", time_choose = "7", on_off_choose = "on")
+on_Sun_0 %>% MC_sampling("on") %>% filter(depart == "국민대") %>% 
+  dplyr::select(day, depart, arrival, time, count, set)%>% head() %>% kable("latex")
+
 ```
 
 예측한 80개의 지하철역의 승하차 인원 수를 통하여 이동경로를 예측한다. 예를들어, 월요일 7시의 석계역에서 승차하는 인원이 800명이라면, 동시간대에 다른 지하철역들의 하차인원수를 통하여 전체 인원수를 나누어 확률을 계산한다. 이를 통하여 석계역에서 승차하는 인원의 목적지(하차역)을 확률에 기반하여 추출하는 것이다. 
 
-### 5.4 이동경로 수요예측
+### 5.4 구간 수요예측
   
 강북횡단선이 추가된 최단경로 데이터베이스를 이용하여 18년 4월 한달 간 역별/시간대별 이동경로 수요 파악를 파악한다.
 사용할 데이터는 2018년 4월 한달 동안의 이용객 개별 승하차 데이터이며 총 112,863,737건이 포함되어 있다.
@@ -1188,8 +1435,7 @@ subway_04_date_on_off_time <- rbind(subway_04_1_date_on_off_time, subway_04_2_da
 
 #saveRDS(file="data/subway_04_route.RDS", subway_04_date_on_off_time)
 
-subway_04_date_on_off_time %>%ungroup%>% select(승차역명, 하차역명) %>% unique()
-## 57948 x 2
+#subway_04_date_on_off_time %>%ungroup%>% select(승차역명, 하차역명) %>% unique()
 ```
  
 #### 5.4.1 이동경로 데이터셋 
@@ -1222,7 +1468,9 @@ subway_04_route$time <- ifelse(str_length(subway_04_route$time)==1,
 
 ```{r}
 subway_04_route <- readRDS(file="../data/subway_04_route.RDS")
-head(subway_04_route) %>% kable()
+ss <- subway_04_route %>% head(10000)
+ss %>% filter(ride_on != ride_off, time == "07") %>%
+  mutate(time = as.numeric(time)) %>% head() %>% kable("latex")
 ```
 
 #### 5.4.2 요일 단위 승-하차역명 시간대 평균 count계산
@@ -1234,7 +1482,10 @@ head(subway_04_route) %>% kable()
 ```{r}
 subway_04_route_daymean <- subway_04_route %>% 
   group_by(day, ride_on, ride_off, time) %>% 
-  summarise(mean_count = sum(count))
+  summarise(count = mean(count)) %>% 
+  mutate(count = ceiling(count))
+subway_04_route_daymean <- subway_04_route_daymean %>% 
+  mutate(time = as.numeric(time))
 ```
 
 
@@ -1246,7 +1497,7 @@ subway_04_route_daymean <- subway_04_route %>%
 
 * MC sampling 결과 포함 
 
-```{r, echo=TRUE}
+```{r, echo=FALSE}
 time_choose <- "15"
 day_choose <- "Fri"
 
@@ -1258,26 +1509,60 @@ summarise_count_db <- function(day_choose, time_choose){
   route_choose_second <- route_choose_frist[time==time_choose,]
   route_choose_second <- route_choose_second %>% 
     mutate(set = paste0(ride_on, "-", ride_off)) %>% as_tibble()
-  on_case <- predict_count_rf(day_choose = day_choose, time_choose = time_choose, 
-                              on_off_choose = "on") %>% MC_sampling( on_off_choose =  "on") %>% 
-    dplyr::select(day, depart, arrival, time, count) %>% mutate(set = paste0(depart, "-", arrival)) %>% 
-    rename(ride_on = depart, ride_off = arrival, mean_count = count)
-  off_case <- predict_count_rf(day_choose = day_choose, time_choose = time_choose, 
-                              on_off_choose = "off") %>% MC_sampling( on_off_choose =  "off") %>% 
-    dplyr::select(day, depart, arrival, time, count) %>% mutate(set = paste0(depart, "-", arrival)) %>% 
-    rename(ride_on = depart, ride_off = arrival, mean_count = count)
+  on_case <- predict_count_gbm(day_choose = day_choose, 
+                               time_choose = time_choose, 
+                               on_off_choose = "on") %>% 
+    MC_sampling(on_off_choose =  "on") %>% 
+    dplyr::select(day, depart, arrival, time, count) %>%
+    mutate(set = paste0(depart, "-", arrival)) %>% 
+    rename(ride_on = depart, ride_off = arrival)
+  off_case <- predict_count_gbm(day_choose = day_choose, 
+                                time_choose = time_choose, 
+                                on_off_choose = "off") %>%
+    MC_sampling( on_off_choose =  "off") %>% 
+    dplyr::select(day, depart, arrival, time, count) %>% 
+    mutate(set = paste0(depart, "-", arrival)) %>% 
+    rename(ride_on = depart, ride_off = arrival)
   unit <- route_choose_second %>% rbind(on_case, off_case) %>% 
     left_join(shortestpath_db_G) %>%
     mutate_all(as.character) %>% 
     ungroup %>% group_by(time, from, to) %>% 
-    summarise(mean = sum(as.numeric(mean_count))) %>% as_tibble()
+    summarise(count = sum(as.numeric(count))) %>% as_tibble()
   unit
 }
 
+route_tot <- function(day_choose, time_choose){
+  route_choose <- as.data.table(subway_04_route_daymean)
+  setkey(route_choose, day)
+  route_choose_frist <- route_choose[day==day_choose,]
+  setkey(route_choose_frist, time)
+  route_choose_second <- route_choose_frist[time==time_choose,]
+  route_choose_second <- route_choose_second %>% 
+    mutate(set = paste0(ride_on, "-", ride_off)) %>% as_tibble()
+  on_case <- predict_count_gbm(day_choose = day_choose, 
+                               time_choose = time_choose, 
+                               on_off_choose = "on") %>% 
+    MC_sampling( on_off_choose =  "on") %>% 
+    dplyr::select(day, depart, arrival, time, count) %>%
+    mutate(set = paste0(depart, "-", arrival)) %>% 
+    rename(ride_on = depart, ride_off = arrival)
+  off_case <- predict_count_gbm(day_choose = day_choose, 
+                                time_choose = time_choose, 
+                                on_off_choose = "off") %>%
+    MC_sampling( on_off_choose =  "off") %>% 
+    dplyr::select(day, depart, arrival, time, count) %>% 
+    mutate(set = paste0(depart, "-", arrival)) %>% 
+    rename(ride_on = depart, ride_off = arrival)
+  result <- route_choose_second %>% rbind(on_case, off_case) 
+  result
+}
+
+
 summarise_count_db(day_choose="Fri", time_choose="15") 
+
 ```
 
-### 6. 수요 예측
+#### 5.4.4 최종 구간 수요예측
 
 지하철에 대한 수요라 하면, 우선적으로 역별 승하차 값이 고려될 것이다. 하지만 실제 지하철 운영에 있어서는 시간대별 또는 특정 구간별 지하철을 이용하는 사람의 수를 예측하는 것이 지하철 운행면에서 더 중요할 것이다. 따라서 추가적으로 지하철 이동 간 경유하는 지하철 구간 또한 지하철 수요를 예측한다.
 
@@ -1289,52 +1574,71 @@ summarise_count_db(day_choose="Fri", time_choose="15")
 
   - 요일 : Sun - Sat 중 선택
 
-  - 시간대 : 00,01,02,04-23 중 선택
+  - 시간대 : 00, 06-23 중 선택
 
   - 노선 : 지하철 네트워크 내 22개 노선 중 선택
   
-```{r, echo=TRUE}
+```{r, echo=FALSE}
 predict_demand_line <- function(day_choose, time_choose, line_choose) {
   line_c <- subway_data_G[[line_choose]]$Name
-  pred_on <- predict_count_rf(day_choose = day_choose, time_choose = time_choose, on_off_choose = "on")
-  pred_off <- predict_count_rf(day_choose = day_choose, time_choose = time_choose, on_off_choose = "off")
+  pred_on <- predict_count_gbm(day_choose = day_choose, 
+                               time_choose = time_choose, on_off_choose = "on")
+  pred_off <- predict_count_gbm(day_choose = day_choose,
+                                time_choose = time_choose, on_off_choose = "off")
   result_sum <- summarise_count_db(day_choose = day_choose, time_choose = time_choose)
-  result_onoff <- pred_on %>% rename(pred_on = mean_count, on = on_off) %>% 
-    left_join(pred_off) %>% rename(pred_off = mean_count, off = on_off) %>% 
+  result_onoff <- pred_on %>% rename(pred_on = count, on = on_off) %>% 
+    left_join(pred_off) %>% rename(pred_off = count, off = on_off) %>% 
     filter(station %in% line_c) %>% 
-    mutate(day = day_choose, pred_on = floor(pred_on),
-           pred_off = floor(pred_off)) %>% 
+    mutate(day = day_choose, pred_on = ceiling(pred_on),
+           pred_off = ceiling(pred_off)) %>% 
     dplyr::select(Day, Time, station, pred_on, pred_off) %>% 
-    rename(day = Day, time = Time)
+    rename(day = Day, time = Time) %>% 
+    mutate(pred_on = ifelse(pred_on < 0, 0, pred_on),
+           pred_off = ifelse(pred_off < 0, 0, pred_off))
   result_path_sum <- result_sum %>% 
     filter(from %in% line_c, to %in% line_c) %>% 
     mutate(day = day_choose) %>% 
-    dplyr::select(day, time, from, to, mean) %>% 
+    dplyr::select(day, time, from, to, count) %>% 
     filter(from != to)
   list(on_off = result_onoff, path = result_path_sum)
 }
 
-predict_demand_line(day_choose="Tue", time_choose="17", line_choose="G")
+predict_demand_line(day_choose="Sun", time_choose="7", line_choose="G")
 ```
-
-#### 6.1 수요예측값을 이용한 탐색적 자료분석
 
 앞단계에서의 예측값을 이용하여 우선 다음 2개의 데이터셋을 구축하였다.
 
 ```{r, eval=FALSE}
 day_choose_list <- c("Sun", "Mon", "Tue", "Wed","Thr", "Fri", "Sat")
-time_choose_list <- as.numeric(unique(ridership_mean_infoset$Time))
+time_choose_list <- c(0, 6:23)
 
 predict_week <- list()
+route_total <- list()
 for(i in seq_along(day_choose_list)){
   for(j in seq_along(time_choose_list)){
       predict_week[[paste0(day_choose_list[i], "-", time_choose_list[j])]] <- 
-        tryCatch(predict_demand_line(day_choose=day_choose_list[i],
-                                     time_choose=time_choose_list[j],
-                                     line_choose="G"),
-                 error=function(e){list("no result")})
+        predict_demand_line(day_choose=day_choose_list[i],
+                            time_choose=time_choose_list[j],
+                            line_choose="G")
+      
+      route_total[[paste0(day_choose_list[i], "-", time_choose_list[j])]] <-
+        route_tot(day_choose=day_choose_list[i],
+                  time_choose=time_choose_list[j]) %>% nrow()
   }
 }
+
+#i<- j <- 14
+route_choose <- as.data.table(subway_04_route_daymean)
+setkey(route_choose, day)
+route_choose_frist <- route_choose[day==day_choose_list[i],]
+setkey(route_choose_frist, time)
+route_choose_frist$time <- as.numeric(route_choose_frist$time)
+route_choose_second <- route_choose_frist[time== time_choose_list[j],]
+route_choose_second %>% 
+  head() %>% kable("latex")
+route_tot(day_choose=day_choose_list[i], time_choose=time_choose_list[j]) %>%
+  head() %>% kable("latex")
+
 
 predict_week_onoff <- predict_week[[1]]$on_off
 predict_week_path <- predict_week[[1]]$path
@@ -1346,16 +1650,22 @@ for(i in 2:length(predict_week)){
 }
 
 
-#save(file="../data/predict_result.RData", predict_week_onoff, predict_week_path)
+
+route_tot(day_choose="Fri", time_choose="15")
+
+#save(file="../data/predict_week.RData", predict_week_onoff, predict_week_path)
+```
+
+```{r}
+load(file="../data/predict_week.RData")
 ```
 
 predict_week_onoff : Sun 00시부터 Sat 23시까지 랜덤포레스트알고리즘을 이용한 강북횡단선 내 지하철역 승하차 예측값
 
 predict_week_path : Sun 00시부터 Sat 23시까지의 데이터 기반 강북횡단선 내 구간 이동 경로 카운트(평균)
 
-```{r}
-load(file="../data/predict_result.RData")
-```
+
+### 6. 결과비교
 
 #### 6.1.1 요일별 구간 수요 예측 결과 
 
@@ -1363,30 +1673,33 @@ load(file="../data/predict_result.RData")
 
 1. 요일별 강북횡단선 내 지하철 역 예상 승하차 이용객수 합
 
-```{r out.width="100%", fig.align="center"}
+```{r out.width="75%", fig.align="center"}
 onoff_daily <- predict_week_onoff %>% 
   mutate(day = factor(day, levels=c("Sun","Mon","Tue","Wed","Thr","Fri","Sat"))) %>% 
   group_by(day, station) %>% 
+  mutate(pred_on = ifelse(pred_on <0, 0, pred_on),
+         pred_off = ifelse(pred_off <0, 0, pred_off)) %>% 
   summarise(on_daily = sum(pred_on), 
             off_daily = sum(pred_off)) 
 onoff_daily_gather <- onoff_daily %>% 
   gather(key='on_off', value = 'count', on_daily,off_daily)
 
-onoff_daily_gather %>% 
-  filter(on_off=='on_daily') %>% 
+onoff_daily_gather %>%
+  mutate(구분 = ifelse(station %in% c("청량리","월곡", "길음","정릉","홍제",
+                                    "디지털미디어시티","등촌","목동"),
+                     "기존", "신설")) %>% 
+  filter(구분=="신설") %>% ungroup %>% 
+  mutate(승하차 = ifelse(on_off=="on_daily", "승차", "하차")) %>% 
+  mutate(day = factor(day, labels=c("일", "월","화", "수", "목", "금", "토"))) %>% 
   ggplot(aes(x=day, y= count)) + 
-  geom_bar(position="dodge", stat="identity") +
-  coord_cartesian(ylim=c(0, 25000)) + 
-  facet_wrap(~station, ncol = 4, scales = "free") +
-  ggtitle("predict value of ride on(day)")
-
-onoff_daily_gather %>% 
-  filter(on_off=='off_daily') %>% 
-  ggplot(aes(x=day, y= count)) + 
-  geom_bar(position="dodge", stat="identity") +
-  coord_cartesian(ylim=c(0, 25000)) + 
-  facet_wrap(~station, ncol = 4, scales = "free") + theme_bw() +
-  ggtitle("predict value of ride off(day)")
+  geom_bar(position="dodge", stat="identity", col="white", fill="black") +
+  coord_cartesian(ylim=c(0, 15000)) + 
+  facet_grid(승하차~station, space="free") +
+  ylab("평균 이용객 수") + xlab("요일") + 
+  theme(strip.text = element_text(size=5), axis.title=element_text(size=7),
+        legend.position = "none",
+        axis.text = element_text(size=6))
+#ggsave(filename="on_off_lineG.pdf", path="D:/workspace/seoulsubway_G/line_G/figure")
 
 ```
 
@@ -1394,55 +1707,230 @@ onoff_daily_gather %>%
 
 #### 6.1.2 시간대별 역/요일/승/하차별 승하차 수요예측 결과
 
-```{r out.width="100%", fig.align="center"}
+```{r out.width="75%", fig.align="center"}
 predict_week_onoff_gather <- predict_week_onoff %>% 
   mutate(day=factor(day, levels=c("Sun","Mon","Tue","Wed","Thr","Fri","Sat"))) %>% 
   gather(on_off, count, pred_on, pred_off)
+```
+
+```{r}
+predict_week_onoff_gather %>% 
+  mutate(count = ifelse(count <0, 0, count)) %>% 
+  mutate(구분 = ifelse(station %in% c("청량리","월곡", "길음","정릉","홍제",
+                                    "디지털미디어시티","등촌","목동"),
+                     "기존", "신설")) %>% 
+  filter(구분=="신설") %>% ungroup %>% 
+  mutate(day = factor(day, labels=c("일", "월","화", "수", "목", "금", "토")),
+         on_off = ifelse(on_off == "pred_on", "승차", "하차")) %>% 
+  filter(on_off == "승차") %>% 
+  ggplot(aes(x=time, y= count, group=day, col=day)) + 
+  geom_line() + facet_grid(~station) +
+  coord_cartesian(ylim=c(0, 1600)) +  theme_bw()  +
+  ylab("평균 이용객 수") + xlab("승차 시간") + labs(col="요일") +
+  theme(strip.text = element_text(size=5), axis.title=element_text(size=7),
+        axis.text = element_text(size=6), legend.title = element_text(size=7),
+        legend.text = element_text(size=7),
+        legend.position = "bottom") + scale_fill_viridis_c() +
+  scale_color_viridis_d() 
+# ggsave(filename="on_time_lineG.pdf", path="D:/workspace/seoulsubway_G/line_G/figure")
 
 predict_week_onoff_gather %>% 
-  filter(on_off=='pred_on') %>% 
+  mutate(count = ifelse(count <0, 0, count)) %>% 
+  mutate(구분 = ifelse(station %in% c("청량리","월곡", "길음","정릉","홍제",
+                                    "디지털미디어시티","등촌","목동"),
+                     "기존", "신설")) %>% 
+  filter(구분=="신설") %>% ungroup %>% 
+  mutate(day = factor(day, labels=c("일", "월","화", "수", "목", "금", "토")),
+         on_off = ifelse(on_off == "pred_on", "승차", "하차")) %>% 
+  filter(on_off == "하차") %>% 
   ggplot(aes(x=time, y= count, group=day, col=day)) + 
-  geom_line() + facet_wrap(~station, ncol = 4, scales = "free") +
-  coord_cartesian(ylim=c(0, 4000)) +  theme_bw() +
-  ggtitle("predict value of ride on(time)")
+  geom_line() + facet_grid(~station) +
+  coord_cartesian(ylim=c(0, 1500)) +  theme_bw()  +
+  ylab("평균 이용객 수") + xlab("하차 시간") + labs(col="요일") +
+  theme(strip.text = element_text(size=6), axis.title=element_text(size=7),
+        axis.text = element_text(size=6), legend.title = element_text(size=7),
+        legend.text = element_text(size=7),
+        legend.position = "bottom") + scale_fill_viridis_c() +
+  scale_color_viridis_d() 
+#ggsave(filename="off_time_lineG.pdf", path="D:/workspace/seoulsubway_G/line_G/figure")
 
-predict_week_onoff_gather %>% 
-  filter(on_off=='pred_off') %>% 
-  ggplot(aes(x=time, y= count, group=day, col=day)) + 
-  geom_line() + facet_wrap(~station, ncol = 4, scales = "free") +
-  coord_cartesian(ylim=c(0, 4000)) +  theme_bw() +
-  ggtitle("predict value of ride off(time)")
+#ggsave(filename="on_off_time_lineG.pdf", path="D:/workspace/seoulsubway_G/line_G/figure")
 ```
 
 #### 6.1.3 요일별 강북횡단선 내 지하철역 승/하차 인원 예측값
 
-평일 강북횡단선을 이용하는 인원은 승차인원과 하차인원의 평균을 고려하면, 약 30만명이 될 것으로 보인다.
-```{r}
+승차인원과 하차인원의 합을 통하여 강북횡단선을 이용하여 승/하차 하는 인원은 약 30만명이 될 것으로 보인다.
+```{r, fig.align='center'}
+onoff_lineG_new <- predict_week_onoff %>% 
+  filter(! station %in% c("청량리", "월곡", "길음", "정릉",
+                   "디지털미디어시티", "홍제", "등촌", "목동")) %>% 
+  mutate(day = factor(day, levels=c("Sun","Mon","Tue","Wed","Thr","Fri","Sat"),
+                      labels=c("일", "월","화", "수", "목", "금", "토"))) %>% 
+  mutate(pred_on = ifelse(pred_on <0, 0, pred_on),
+         pred_off = ifelse(pred_off <0, 0, pred_off)) %>% 
+  group_by(day) %>% 
+  summarise(ride_on = sum(pred_on),
+            ride_off = sum(pred_off)) 
+
+########### 신설예정역 승하차
+onoff_lineG_new %>% kable("latex")
+
+
 predict_week_onoff %>% 
-  mutate(day = factor(day, levels=c("Sun","Mon","Tue","Wed","Thr","Fri","Sat"))) %>% 
+  mutate(day = factor(day, levels=c("Sun","Mon","Tue","Wed","Thr","Fri","Sat"),
+                      labels=c("일", "월","화", "수", "목", "금", "토"))) %>% 
+  mutate(pred_on = ifelse(pred_on <0, 0, pred_on),
+         pred_off = ifelse(pred_off <0, 0, pred_off)) %>% 
   group_by(day) %>% 
   summarise(ride_on = sum(pred_on),
             ride_off = sum(pred_off),
-            mean = (ride_on+ride_off)/2) %>% kable()
+            total = (ride_on+ride_off)) %>% filter(! day %in% c("일", "토")) %>% 
+  summarise(mean = mean(total)/2)
 ```
 
 #### 6.1.4 역 사이 구간 수요
 
-* 이용객 개별 승하차데이터를 통하여 계산된 결과로써 각 노선내에서 출발하는 경우가 고려되어지지 않는다. 이는 데이터가 가지는 한계로써 1-8호선에서 출발하고 도착하는 경우만 고려되었기 때문에 아래와 같은 구간 수가 계산된다.  
-
-* 이는 없는 노선이 생겼다는 가정하에서 나온 결과값으로 1-8호선 내 실제 지하철 이용객들의 이동경로를 최단경로알고리즘을 통하여 알아본 후 계산한 결과이다. 데이터가 가지는 한계로 인하여 1-8호선에 속하지 않은 지하철에서 출발 또는 도착된 경로가 반영되지 않았으므로, 정확한 결과라고는 말할 수 없다.
+* 이는 없는 노선이 생겼다는 가정하에서 나온 결과값으로 1-8호선 내 실제 지하철 이용객들의 이동경로를 최단경로 자료구조를 통하여 알아본 후 계산한 결과이다.
 
 ```{r out.width="80%", fig.align='center'}
+#predict_week_path %>% head() %>% kable("latex")
+
 predict_week_path %>% 
   mutate(section = paste0(from, "-", to),
          day = factor(day, levels=c("Sun","Mon","Tue","Wed","Thr","Fri","Sat"))) %>% 
-  filter(day=="Mon", from!=to) %>% 
+  filter(from!=to) %>% 
   group_by(day, section) %>% 
-  summarise(total = sum(mean)) %>% 
-  arrange(desc(total)) %>% kable()
+  summarise(total = sum(count)) %>% 
+  group_by(day) %>% summarise(mean_tot = mean(total)) %>% 
+  kable("latex")
+
+
+pred_sec_count <- predict_week_path %>% 
+  mutate(from = factor(from, levels=c("청량리", "홍릉", "월곡", "종암사거리", "길음", "정릉", 
+                                        "국민대", "평창동", "상명대입구", "홍제", "서대문구청", 
+                                        "명지대", "남가좌", "디지털미디어시티", "상암", "등촌",
+                                        "신등촌", "목동사거리", "목동")),
+           to = factor(to, levels=c("청량리", "홍릉", "월곡", "종암사거리", "길음", "정릉", 
+                                    "국민대", "평창동", "상명대입구", "홍제", "서대문구청", 
+                                    "명지대", "남가좌", "디지털미디어시티", "상암", "등촌",
+                                    "신등촌", "목동사거리", "목동")),
+           from_rank = as.numeric(from), to_rank = as.numeric(to)) %>% 
+  mutate(type= ifelse(from_rank > to_rank, "상행", "하행")) %>% 
+  mutate(section = paste0(from, "-", to),
+         day = factor(day, levels=c("Sun","Mon","Tue","Wed","Thr","Fri","Sat"),
+                      labels = c("일", "월", "화", "수", "목", "금", "토")),
+         from_lev = as.numeric(from), to_lev = as.numeric(to)) %>% 
+  filter(from!=to) %>% 
+  group_by(day, type, section) %>% 
+  summarise(total = sum(count))
+
+
+pred_sec_count %>% 
+  group_by(day, type) %>% summarise(mean_tot = mean(total) %>% ceiling) %>%
+  ungroup %>% rename(요일=day) %>% 
+  spread("type","mean_tot") %>% kable("latex")
+
+inner_G <- pred_sec_count$section %>% unique()
+unner_G_db <- shortestpath_db_G %>% mutate(section=paste0(from, "-", to)) %>% 
+  filter(section %in% inner_G)
+
+on_route_G <- unner_G_db %>% separate(set, c("st", "end"), remove=FALSE) %>% 
+  filter(st %in% c("청량리", "월곡", "길음", "정릉",
+                   "디지털미디어시티", "홍제", "등촌", "목동")) 
+
+off_route_G <- unner_G_db %>% separate(set, c("st", "end"), remove=FALSE) %>% 
+  filter(end %in% c("청량리", "월곡", "길음", "정릉",
+                   "디지털미디어시티", "홍제", "등촌", "목동")) 
+
+########### 환승역들 승하차 인원수 
+route_choose <- as.data.table(subway_04_route_daymean)
+route_choose_sum <- route_choose %>% 
+  mutate(set = paste0(ride_on, "-", ride_off)) %>% 
+  group_by(day, set) %>% summarise(sum_count = sum(count)) %>% 
+  as.data.table()
+setkey(route_choose_sum, set)
+transfer_lineG <- route_choose_sum[set %in% unique(on_route_G$set), ] %>% group_by(day) %>% 
+  summarise(on_count = sum(sum_count)) %>% cbind(
+route_choose_sum[set %in% unique(off_route_G$set), ] %>% group_by(day) %>% 
+  summarise(off_count = sum(sum_count)) %>% 
+  ungroup %>% dplyr::select(-day)
+) %>% as_tibble()
+transfer_lineG %>% kable("latex")
+
+transfer_lineG$day <- c("금", "목", "수", "월", "일", "토", "화")
+tot_onoff_result <- merge(transfer_lineG, onoff_lineG_new) %>%
+  mutate(on = on_count + ride_on,
+         off = off_count + ride_off,
+         tot = on + off)
+tot_onoff_result$tot[c(-5, -6)] %>% mean()
+
+inner_outer_G <- unner_G_db %>% separate(set, c("st", "end"), remove=FALSE) %>% 
+  filter(! st %in% line_G$Name, ! end %in% line_G$Name)
+### 1604개의 환승경로로 이동하는 경우 
+inner_outer_G$set %>% unique %>% length()
+
+summarise_count_G <- function(day_choose, time_choose){
+  route_choose <- as.data.table(subway_04_route_daymean)
+  setkey(route_choose, day)
+  route_choose_frist <- route_choose[day==day_choose,]
+  setkey(route_choose_frist, time)
+  route_choose_second <- route_choose_frist[time==time_choose,]
+  route_choose_second <- route_choose_second %>% 
+    mutate(set = paste0(ride_on, "-", ride_off)) %>% as_tibble()
+  on_case <- predict_count_gbm(day_choose = day_choose, 
+                               time_choose = time_choose, 
+                               on_off_choose = "on") %>% 
+    MC_sampling(on_off_choose =  "on") %>% 
+    dplyr::select(day, depart, arrival, time, count) %>%
+    mutate(set = paste0(depart, "-", arrival)) %>% 
+    rename(ride_on = depart, ride_off = arrival)
+  off_case <- predict_count_gbm(day_choose = day_choose, 
+                                time_choose = time_choose, 
+                                on_off_choose = "off") %>%
+    MC_sampling( on_off_choose =  "off") %>% 
+    dplyr::select(day, depart, arrival, time, count) %>% 
+    mutate(set = paste0(depart, "-", arrival)) %>% 
+    rename(ride_on = depart, ride_off = arrival)
+  unit <- route_choose_second %>% rbind(on_case, off_case) %>% 
+    as.data.table()
+  setkey(unit, set)
+  unit[set %in% unique(inner_outer_G$set)] %>% 
+    group_by(day, set) %>% summarise(sum_count = sum(count))
+}
+
+
+day_choose_list <- c("Sun", "Mon", "Tue", "Wed","Thr", "Fri", "Sat")
+time_choose_list <- c(0, 6:23)
+tot_day_list <- list()
+for(i in seq_along(day_choose_list)){
+  for(j in 1:length(time_choose_list)){
+    tot_day_list[[paste0(day_choose_list[i], "-", time_choose_list[j])]] <-
+      summarise_count_G(day_choose=day_choose_list[i], 
+                        time_choose = time_choose_list[j]) %>%
+      summarise(tot_sum = sum(sum_count))
+  }
+}
+
+daily_tot <- data.frame(matrix(0, 19, 7))
+colnames(daily_tot) <- c("일", "월", "화", "수","목", "금", "토")
+for(k in 1:19){
+  daily_tot[k,1] <- tot_day_list[[k]]$tot_sum
+  daily_tot[k,2] <- tot_day_list[[(k+19)]]$tot_sum
+  daily_tot[k,3] <- tot_day_list[[(k+38)]]$tot_sum
+  daily_tot[k,4] <- tot_day_list[[(k+57)]]$tot_sum
+  daily_tot[k,5] <- tot_day_list[[(k+76)]]$tot_sum
+  daily_tot[k,6] <- tot_day_list[[(k+95)]]$tot_sum
+  daily_tot[k,7] <- tot_day_list[[(k+114)]]$tot_sum
+}
+
+inner_result <- daily_tot %>% mutate_all(as.numeric) %>% colSums()
+data.frame(day = daily_tot %>% names(), inner_count = inner_result) %>% 
+  left_join(tot_onoff_result) %>% mutate(final = tot + inner_count)
+
+
 ```
 
-```{r out.width="80%"}
+```{r out.width="80%", fig.align='center'}
 predict_week_path_longlat <- subway_data_G[["G"]][,c("Name", "long", "lat")] %>% 
   rename(from = Name) %>% 
   right_join(predict_week_path) %>% 
@@ -1461,46 +1949,1109 @@ predict_week_path_longlat <- predict_week_path_longlat %>%
                                     "신등촌", "목동사거리", "목동")),
            from_rank = as.numeric(from), to_rank = as.numeric(to))
 
-path_count_G <- function(time_choose, day_choose, up_down){
+path_count_G <- function(time_choose, day_choose, on_off){
   predict_week_path_longlat_key <- predict_week_path_longlat %>% 
       filter(from_rank>to_rank)
-  if(up_down == "up"){
+  if(on_off == "on"){
     predict_week_path_longlat_key <- predict_week_path_longlat %>% 
       filter(from_rank<to_rank)
   }
   from_set <- predict_week_path_longlat_key %>%
     mutate(set = paste0(from, "-", to)) %>% 
     filter(time==time_choose, day == day_choose) %>% 
-    dplyr::select(time, day, set, from, from_long, from_lat, mean)
+    dplyr::select(time, day, set, from, from_long, from_lat, count)
   from_set$key <- "from"
   to_set <- predict_week_path_longlat_key %>%
     mutate(set = paste0(from, "-", to)) %>% 
     filter(time==time_choose, day == day_choose) %>% 
-    dplyr::select(time, day, set, to, to_long, to_lat, mean)
+    dplyr::select(time, day, set, to, to_long, to_lat, count)
   to_set$key <- "to"  
   colnames(from_set) <- colnames(to_set) <- c("time", "day", "set", "station",
-                                              "long", "lat", "mean", "key")
+                                              "long", "lat", "count", "key")
   from_to_path_set <- rbind(from_set, to_set)
   ggmap(get_map(location = c(126.9534, 37.58047), zoom = 12)) + 
-    geom_path(data=from_to_path_set, aes(x=long, y=lat, col=mean, group=set), size=4) +
+    geom_path(data=from_to_path_set, aes(x=long, y=lat, col=count, group=set), size=4) +
     scale_color_gradient(low="yellow", high="red") +
-    ggtitle(paste("each count of section", "in", time_choose, day_choose, up_down))
+    ggtitle(paste("each count of section", "in", time_choose, day_choose, on_off))
 }
 
 ```
 
 * 특정 요일/시간대 구간 카운트 시각화 예시
 
-```{r out.width="75%", fig.align="center", echo=TRUE}
-path_count_G(time_choose = "17", day_choose = "Fri", up_down="up")
+```{r out.width="75%", fig.align="center", echo=FALSE}
+predict_week_path_longlat_key <- predict_week_path_longlat %>% 
+      mutate(type = ifelse(from_rank>to_rank, "상행", "하행"))
+from_set <- predict_week_path_longlat_key %>%
+  mutate(set = paste0(from, "-", to)) %>% 
+  dplyr::select(time, day, set, from, from_long, from_lat, count, type)
+from_set$key <- "from"
+to_set <- predict_week_path_longlat_key %>%
+  mutate(set = paste0(from, "-", to)) %>% 
+  dplyr::select(time, day, set, to, to_long, to_lat, count, type)
+to_set$key <- "to"  
+colnames(from_set) <- colnames(to_set) <- c("time", "day", "set", "station",
+                                            "long", "lat", "count", "type", "key")
+from_to_path_set <- rbind(from_set, to_set)
 
-path_count_G(time_choose = "17", day_choose = "Fri", up_down="down")
+from_to_path_set_select <- from_to_path_set %>% filter(time == "15", day=="Mon")
+from_to_path_set_select2 <- from_to_path_set %>% filter(time == "18", day=="Mon")
+
+from_to_path_set_tot <- rbind(from_to_path_set_select, from_to_path_set_select2) %>% 
+  mutate(time2 = paste0(time, "시"))
+
+ggmap(get_map(location = c(126.95, 37.58), zoom = 12)) + 
+   geom_path(data=from_to_path_set_tot, 
+             aes(x=long, y=lat, col=count, group=set), size=2) +
+  scale_x_continuous(breaks = c(126.8, 126.9, 127)) +
+  scale_y_continuous(breaks = c(37.5, 37.6)) +
+  facet_grid(time2~type) +
+  labs(col="평균 이용객 수") + xlab("경도") + ylab("위도") +
+  scale_fill_viridis_c() + scale_color_viridis_c() +
+  theme(axis.text.x = element_text(angle = 90))
+
+#ggsave(filename="section_demand.pdf", path="D:/workspace/seoulsubway_G/line_G/figure")
 ```
 
-```{r out.width="75%", fig.align="center", echo=TRUE}
-path_count_G(time_choose = "7", day_choose = "Mon", up_down="up")
+```{r}
+predict_week_path_longlat_key %>% 
+  filter(type == "상행") %>% 
+  mutate(day = factor(day, levels=c("Sun","Mon","Tue","Wed","Thr","Fri","Sat"),
+                      labels=c("일", "월","화", "수", "목", "금", "토"))) %>% 
+  mutate(구간 = paste0(from, "-", to),
+         time = as.numeric(time)) %>% 
+  ggplot(aes(x=time, y=count, col=구간, group=구간)) +
+  geom_line() + facet_grid(~day) + theme_bw() + 
+  ylab("이용객 수") + xlab("시간") +
+  theme(strip.text = element_text(size=5), axis.title=element_text(size=7),
+        axis.text = element_text(size=5), legend.title = element_text(size=6),
+        legend.text = element_text(size=6), legend.key.size = unit(0.5, "cm"),
+        legend.position = "bottom") + 
+  scale_fill_viridis_c() + scale_color_viridis_d()
+#ggsave(filename="up_section.pdf", path="D:/workspace/seoulsubway_G/line_G/figure")
 
-path_count_G(time_choose = "7", day_choose = "Mon", up_down="down")
+predict_week_path_longlat_key %>% 
+  filter(type == "하행") %>% 
+  mutate(day = factor(day, levels=c("Sun","Mon","Tue","Wed","Thr","Fri","Sat"),
+                      labels=c("일", "월","화", "수", "목", "금", "토"))) %>% 
+  mutate(구간 = paste0(from, "-", to),
+         time = as.numeric(time)) %>% 
+  ggplot(aes(x=time, y=count, col=구간, group=구간)) +
+  geom_line() + facet_grid(~day) + theme_bw() + 
+  ylab("이용객 수") + xlab("시간") +
+  theme(strip.text = element_text(size=5), axis.title=element_text(size=7),
+        axis.text = element_text(size=5), legend.title = element_text(size=6),
+        legend.text = element_text(size=6), legend.key.size = unit(0.5, "cm"),
+        legend.position = "bottom") + 
+  scale_fill_viridis_c() + scale_color_viridis_d()
+#ggsave(filename="down_section.pdf", path="D:/workspace/seoulsubway_G/line_G/figure")
+
+#ggsave(filename="up_down_section.pdf", path="D:/workspace/seoulsubway_G/line_G/figure")
+```
+
+
+### prediction interval for gbm model
+```{r}
+crit_t <- abs(qt(0.025, df = 70154-44))
+
+predict_interval_gbm <- function(day_choose = "Fri", time_choose = "20", on_off_choose = "off"){
+  station_predict <- setdiff(station_seoul_info$station,
+                             ridership_mean_infoset$station)
+  new_data <- station_seoul_info %>% 
+    filter(station %in% station_predict) %>%
+    dplyr::select(-station) %>% 
+    mutate(Day = factor(day_choose, levels=levels(ridership_mean_infoset_train$Day)), 
+           Time = time_choose, 
+           on_off = factor(on_off_choose, levels(ridership_mean_infoset_train$on_off))) %>%
+    mutate(Time = as.numeric(Time), on_off = as.factor(on_off),
+           address_gu = as.factor(address_gu)) %>% 
+    dplyr::select(colnames(ridership_mean_infoset_train)[c(-3,-5)])
+
+  result_data <- matrix(nrow = nrow(new_data), ncol=4) %>% data.frame()
+  colnames(result_data) <- c("station", "predict_value", "lower_bound", "upper_bound")
+  result_data$station <- station_predict
+  for(i in 1:nrow(new_data)){
+    x_0 <- new_data[i,]
+    y_hat <- predict(fit_gbm, newdata = x_0)
+    upper <- y_hat + crit_t * 0.4353 
+    lower <- y_hat - crit_t * 0.4353 
+    result_data[i,c(2,3,4)] <- c(y_hat, lower, upper)
+  }
+  station_seoul_info %>% 
+    filter(station %in% station_predict) %>% 
+    left_join(result_data) %>% 
+    mutate(Day = day_choose, Time = time_choose, on_off = on_off_choose) %>% 
+    mutate(Time = as.numeric(Time), on_off = as.factor(on_off)) %>% 
+    dplyr::select(station, Day, Time, on_off, predict_value, lower_bound, upper_bound) %>% 
+    rbind(ridership_mean_infoset_train %>% ungroup %>%
+            rename(predict_value=mean_count) %>% 
+            filter(Time == time_choose, Day == day_choose, on_off == on_off_choose) %>% 
+            mutate(Time = as.numeric(Time), on_off = as.factor(on_off),
+                   lower_bound = NA, upper_bound = NA) %>% 
+            dplyr::select(station, Day, Time, on_off, predict_value, lower_bound, upper_bound)) %>% 
+    as_tibble()
+}
+```
+
+  
+
+
+################ interval ################
+
+```{r}
+#load(file="../data/fit_cart.RData")
+load(file="../data/fit_gbm_log.RData")
+#load(file="../data/fit_temp.RData")
+library(caret)
+library(gbm)
+
+varImp(fit_gbm)$importance %>% 
+  as.data.frame() %>%
+  rownames_to_column() %>%
+  arrange(desc(Overall)) %>%
+  head(20) %>% 
+  mutate(변수명 = forcats::fct_inorder(rowname ),
+            중요도 = Overall) %>% ggplot() +
+    geom_col(aes(x = 변수명, y = 중요도)) + coord_flip() +
+    theme_bw()
+
+#ggsave(filename="varimpplot_log.pdf", path="D:/workspace/seoulsubway_G/line_G/figure")
+```
+
+
+```{r}
+ridership_mean_infoset_train <- ridership_mean_infoset_train %>% 
+  mutate_if(is.character, as.factor) %>% mutate(mean_count = log(mean_count + 1))
+
+predict_count_gbm <- function(day_choose = "Fri", time_choose = "20", on_off_choose = "off"){
+  station_predict <- setdiff(station_seoul_info$station,
+                             ridership_mean_infoset$station)
+  new_data <- station_seoul_info %>% 
+    filter(station %in% station_predict) %>%
+    dplyr::select(-station) %>% 
+    mutate(Day = factor(day_choose, levels=levels(ridership_mean_infoset_train$Day)), 
+           Time = time_choose, on_off = factor(on_off_choose, levels(ridership_mean_infoset_train$on_off))) %>% 
+    mutate(Time = as.numeric(Time), on_off = as.factor(on_off)) %>% 
+    dplyr::select(colnames(ridership_mean_infoset_train)[c(-3,-5)])
+
+  station_seoul_info %>% 
+    filter(station %in% station_predict) %>% 
+    mutate(count = predict(fit_gbm, new_data)) %>% 
+    mutate(Day = day_choose, Time = time_choose, on_off = on_off_choose) %>% 
+    mutate(Time = as.numeric(Time), on_off = as.factor(on_off)) %>% 
+    rbind(ridership_mean_infoset_train %>% ungroup %>%
+            rename(count=mean_count) %>% 
+            filter(Time == time_choose, Day == day_choose, on_off == on_off_choose) %>% 
+            mutate(Time = as.numeric(Time), on_off = as.factor(on_off))) %>% 
+    as_tibble()
+}
+
+predict_count_gbm(day_choose = "Fri", time_choose = "20", 
+                  on_off_choose = "off") %>% dplyr::select(station, count)
+```
+
+### prediction interval for gbm model
+```{r}
+crit_t <- abs(qt(0.025, df = 70154-44))
+
+predict_interval_gbm <- function(day_choose = "Fri", time_choose = "20", on_off_choose = "off"){
+  station_predict <- setdiff(station_seoul_info$station,
+                             ridership_mean_infoset$station)
+  new_data <- station_seoul_info %>% 
+    filter(station %in% station_predict) %>%
+    dplyr::select(-station) %>% 
+    mutate(Day = factor(day_choose, levels=levels(ridership_mean_infoset_train$Day)), 
+           Time = time_choose, 
+           on_off = factor(on_off_choose, levels(ridership_mean_infoset_train$on_off))) %>%
+    mutate(Time = as.numeric(Time), on_off = as.factor(on_off),
+           address_gu = as.factor(address_gu)) %>% 
+    dplyr::select(colnames(ridership_mean_infoset_train)[c(-3,-5)])
+
+  result_data <- matrix(nrow = nrow(new_data), ncol=4) %>% data.frame()
+  colnames(result_data) <- c("station", "predict_value", "lower_bound", "upper_bound")
+  result_data$station <- station_predict
+  for(i in 1:nrow(new_data)){
+    x_0 <- new_data[i,]
+    y_hat <- predict(fit_gbm, newdata = x_0)
+    upper <- y_hat + crit_t * 0.4353 
+    lower <- y_hat - crit_t * 0.4353 
+    result_data[i,c(2,3,4)] <- c(y_hat, lower, upper)
+  }
+  station_seoul_info %>% 
+    filter(station %in% station_predict) %>% 
+    left_join(result_data) %>% 
+    mutate(Day = day_choose, Time = time_choose, on_off = on_off_choose) %>% 
+    mutate(Time = as.numeric(Time), on_off = as.factor(on_off)) %>% 
+    dplyr::select(station, Day, Time, on_off, predict_value, lower_bound, upper_bound) %>% 
+    rbind(ridership_mean_infoset_train %>% ungroup %>%
+            rename(predict_value=mean_count) %>% 
+            filter(Time == time_choose, Day == day_choose, on_off == on_off_choose) %>% 
+            mutate(Time = as.numeric(Time), on_off = as.factor(on_off),
+                   lower_bound = NA, upper_bound = NA) %>% 
+            dplyr::select(station, Day, Time, on_off, predict_value, lower_bound, upper_bound)) %>% 
+    as_tibble()
+}
+```
+
+### 5.3 몬테카를로 샘플링
+
+* 강북횡단선이 포함된 80개의 지하철역에 대하여 예측된 승하차 수요를 통하여 몬테카를로 샘플링을 시행함
+
+```{r}
+on_fri_15 <- predict_interval_gbm(day_choose = "Fri", time_choose = "15", on_off_choose = "on") 
+off_fri_15 <- predict_interval_gbm(day_choose = "Fri", time_choose = "15", on_off_choose = "off")
+input_data <- on_fri_15
+
+MC_sampling <- function(input_data, on_off_choose, type="mean"){
+  result_generate <- list()
+  nms_get <- setdiff(station_seoul_info$station, ridership_mean_infoset$station)
+  input_data <- input_data %>% mutate(mean = ifelse(predict_value<0, 0, exp(predict_value)-1) %>% ceiling(),
+                                      lower = ifelse(lower_bound<0, 0, exp(lower_bound)-1) %>% ceiling(),
+                                      upper = ifelse(upper_bound<0, 0, exp(upper_bound)-1) %>% ceiling()) 
+  for(i in 1:length(nms_get)){
+    nrow_i <- input_data %>% filter(station==nms_get[i]) %>%
+      dplyr::select(type) %>% t() %>% as.numeric() %>% ceiling()
+    if(nrow_i > 0){
+      result_generate[[nms_get[i]]] <- data.frame(matrix(0, nrow_i, 3))
+      colnames(result_generate[[nms_get[i]]]) <- c("time", on_off_choose, 'generate')
+      result_generate[[nms_get[i]]]$time <- input_data$Time[1]
+      result_generate[[nms_get[i]]][,on_off_choose] <- nms_get[i]
+      tot_except_i <- sum(input_data[input_data$station != nms_get[i], "mean"])
+      generate <- sample(x = input_data$station[input_data$station != nms_get[i]],
+                         replace =TRUE, 
+                         size = nrow_i, 
+                         prob = (input_data[input_data$station != nms_get[i], "mean"]/tot_except_i) %>% t() %>% as.numeric())
+      result_generate[[nms_get[i]]]$generate <- generate
+    }
+  }
+  gen_result <- result_generate[[1]]
+  if(length(result_generate)>=2){
+    for(i in 2:length(result_generate)){
+      gen_result <- rbind(gen_result, result_generate[[i]])
+    }
+  }
+   
+  if(on_off_choose=="on"){
+    gen_result <- gen_result %>% rename(depart = on, arrival = generate)
+  }else{
+    gen_result <- gen_result %>% rename(depart = generate, arrival = off)
+  }
+  gen_result %>% mutate(set = paste0(depart, "-", arrival),
+                        day = input_data$Day %>% unique) %>%
+    group_by(time, day, depart, arrival, set) %>% summarise(count=n()) %>% ungroup()
+}
+
+on_Sun_0 <- predict_interval_gbm(day_choose = "Sun", time_choose = "7", on_off_choose = "on")
+on_Sun_0 %>% MC_sampling("on", type="mean") %>% filter(depart == "국민대") %>% 
+  dplyr::select(day, depart, arrival, time, count, set)%>% head() %>% kable("latex")
+
+```
+
+예측한 80개의 지하철역의 승하차 인원 수를 통하여 이동경로를 예측한다. 예를들어, 월요일 7시의 석계역에서 승차하는 인원이 800명이라면, 동시간대에 다른 지하철역들의 하차인원수를 통하여 전체 인원수를 나누어 확률을 계산한다. 이를 통하여 석계역에서 승차하는 인원의 목적지(하차역)을 확률에 기반하여 추출하는 것이다. 
+
+### 5.4 구간 수요예측
+  
+강북횡단선이 추가된 최단경로 데이터베이스를 이용하여 18년 4월 한달 간 역별/시간대별 이동경로 수요 파악를 파악한다.
+사용할 데이터는 2018년 4월 한달 동안의 이용객 개별 승하차 데이터이며 총 112,863,737건이 포함되어 있다.
+
+
+#### 5.4.1 이동경로 데이터셋 
+
+2018년 4월 한달간 1억건이 넘는 이용객의 경로에 대하여 동일한 승차역, 하차역 경로에 대한 데이터셋을 구축한다. 이때 일자별 승차역, 하차역, 시간대를 기준으로 경로의 합계를 통하여 제작하였다.
+
+```{r, eval=FALSE}
+subway_04_route <- readRDS(file="../data/subway_04_route.RDS")
+# subway_04_route <- readRDS(file="line_G/data/subway_04_route.RDS")
+
+subway_04_route <- ungroup(subway_04_route)
+colnames(subway_04_route) <- iconv(colnames(subway_04_route), "utf8")
+
+#subway_04_route <- subway_04_route %>% 
+#  mutate(set = paste0(승차역명, "-", 하차역명),
+#         set_reverse= paste0(하차역명, "-", 승차역명))
+day <- c(rep(c("일", "월", "화", "수", "목", "금", "토"), 4), "일", "월")
+
+subway_04_route <- data.frame(운행일자 = c(20180401:20180430), 요일 = day) %>% 
+  right_join(subway_04_route)
+
+colnames(subway_04_route) <- c("date", "day", "ride_on", "ride_off", "time", "count")
+
+subway_04_route$time <- ifelse(str_length(subway_04_route$time)==1,
+                               paste0("0", subway_04_route$time),
+                               subway_04_route$time)
+
+#saveRDS(file="../data/subway_04_route.RDS", subway_04_route)
+```
+
+```{r}
+subway_04_route <- readRDS(file="../data/subway_04_route.RDS")
+ss <- subway_04_route %>% head(10000)
+ss %>% filter(ride_on != ride_off, time == "07") %>%
+  mutate(time = as.numeric(time)) %>% head() %>% kable("latex")
+```
+
+#### 5.4.2 요일 단위 승-하차역명 시간대 평균 count계산
+
+* subway_04_route_daymean : 요일/시간대별 `출발역-도착역` 경로 평균
+
+이동경로 데이터셋에 대하여 요일별로 평균을 계산하여, 특정요일 특정시간대 하나의 승차역-하차역으로 이루어지는 이동경로에 대한 평균을 계산할 수 있었다.
+
+```{r}
+subway_04_route_daymean <- subway_04_route %>% 
+  group_by(day, ride_on, ride_off, time) %>% 
+  summarise(count = mean(count)) %>% 
+  mutate(count = ceiling(count))
+subway_04_route_daymean <- subway_04_route_daymean %>% 
+  mutate(time = as.numeric(time))
+```
+
+
+#### 5.4.3 특정 시간대 기준 이동경로수 계산
+
+* 강북횡단선이 반영된 최단경로 DB
+
+* 특정요일, 특정시간대 평균 count 확인
+
+* MC sampling 결과 포함 
+
+```{r, echo=FALSE}
+time_choose <- "15"
+day_choose <- "Fri"
+
+summarise_count_db <- function(day_choose, time_choose, type){
+  route_choose <- as.data.table(subway_04_route_daymean)
+  setkey(route_choose, day)
+  route_choose_frist <- route_choose[day==day_choose,]
+  setkey(route_choose_frist, time)
+  route_choose_second <- route_choose_frist[time==time_choose,]
+  route_choose_second <- route_choose_second %>% 
+    mutate(set = paste0(ride_on, "-", ride_off)) %>% as_tibble()
+  on_case <- predict_interval_gbm(day_choose = day_choose, 
+                               time_choose = time_choose, 
+                               on_off_choose = "on") %>% 
+    MC_sampling(on_off_choose =  "on", type) %>% 
+    dplyr::select(day, depart, arrival, time, count) %>%
+    mutate(set = paste0(depart, "-", arrival)) %>% 
+    rename(ride_on = depart, ride_off = arrival)
+  off_case <- predict_interval_gbm(day_choose = day_choose, 
+                                time_choose = time_choose, 
+                                on_off_choose = "off") %>%
+    MC_sampling( on_off_choose =  "off") %>% 
+    dplyr::select(day, depart, arrival, time, count) %>% 
+    mutate(set = paste0(depart, "-", arrival)) %>% 
+    rename(ride_on = depart, ride_off = arrival)
+  unit <- route_choose_second %>% rbind(on_case, off_case) %>% 
+    left_join(shortestpath_db_G) %>%
+    mutate_all(as.character) %>% 
+    ungroup %>% group_by(time, from, to) %>% 
+    summarise(count = sum(as.numeric(count))) %>% as_tibble()
+  unit
+}
+
+route_tot <- function(day_choose, time_choose, type){
+  route_choose <- as.data.table(subway_04_route_daymean)
+  setkey(route_choose, day)
+  route_choose_frist <- route_choose[day==day_choose,]
+  setkey(route_choose_frist, time)
+  route_choose_second <- route_choose_frist[time==time_choose,]
+  route_choose_second <- route_choose_second %>% 
+    mutate(set = paste0(ride_on, "-", ride_off)) %>% as_tibble()
+  on_case <- predict_interval_gbm(day_choose = day_choose, 
+                               time_choose = time_choose, 
+                               on_off_choose = "on") %>% 
+    MC_sampling(on_off_choose =  "on", type) %>% 
+    dplyr::select(day, depart, arrival, time, count) %>%
+    mutate(set = paste0(depart, "-", arrival)) %>% 
+    rename(ride_on = depart, ride_off = arrival)
+  off_case <- predict_interval_gbm(day_choose = day_choose, 
+                                time_choose = time_choose, 
+                                on_off_choose = "off") %>%
+    MC_sampling(on_off_choose =  "off", type) %>% 
+    dplyr::select(day, depart, arrival, time, count) %>% 
+    mutate(set = paste0(depart, "-", arrival)) %>% 
+    rename(ride_on = depart, ride_off = arrival)
+  result <- route_choose_second %>% rbind(on_case, off_case) 
+  result
+}
+
+
+summarise_count_db(day_choose="Fri", time_choose="15", type="mean") 
+summarise_count_db(day_choose="Fri", time_choose="15", type="lower") 
+
+```
+
+#### 5.4.4 최종 구간 수요예측
+
+지하철에 대한 수요라 하면, 우선적으로 역별 승하차 값이 고려될 것이다. 하지만 실제 지하철 운영에 있어서는 시간대별 또는 특정 구간별 지하철을 이용하는 사람의 수를 예측하는 것이 지하철 운행면에서 더 중요할 것이다. 따라서 추가적으로 지하철 이동 간 경유하는 지하철 구간 또한 지하철 수요를 예측한다.
+
+1. 역별 승하차 수
+
+2. 역 이동경유 횟수
+
+`predict_demand_line(day_choose, time_choose, line_choose)` 
+
+  - 요일 : Sun - Sat 중 선택
+
+  - 시간대 : 00, 06-23 중 선택
+
+  - 노선 : 지하철 네트워크 내 22개 노선 중 선택
+  
+```{r, echo=FALSE}
+predict_demand_line <- function(day_choose, time_choose, line_choose, type) {
+  line_c <- subway_data_G[[line_choose]]$Name
+  pred_on <- predict_interval_gbm(day_choose = day_choose, 
+                               time_choose = time_choose, on_off_choose = "on") %>% 
+        mutate(mean = ifelse(predict_value<0, 0, exp(predict_value)-1) %>% ceiling(),
+               lower = ifelse(lower_bound<0, 0, exp(lower_bound)-1) %>% ceiling(),
+               upper = ifelse(upper_bound<0, 0, exp(upper_bound)-1) %>% ceiling()) %>% 
+    dplyr::select(station, Day, Time, on_off, type) %>% rename(pred_on = type, on = on_off)
+  pred_off <- predict_interval_gbm(day_choose = day_choose,
+                                time_choose = time_choose, on_off_choose = "off") %>% 
+        mutate(mean = ifelse(predict_value<0, 0, exp(predict_value)-1) %>% ceiling(),
+               lower = ifelse(lower_bound<0, 0, exp(lower_bound)-1) %>% ceiling(),
+               upper = ifelse(upper_bound<0, 0, exp(upper_bound)-1) %>% ceiling()) %>% 
+    dplyr::select(station, Day, Time, on_off, type) %>% rename(pred_off = type, off = on_off)
+  result_sum <- summarise_count_db(day_choose = day_choose, time_choose = time_choose, type)
+  result_onoff <- pred_on %>% 
+    left_join(pred_off, by=c("station", "Day", "Time")) %>%
+    filter(station %in% line_c) %>% 
+    mutate(day = day_choose, pred_on = ceiling(pred_on),
+           pred_off = ceiling(pred_off)) %>% 
+    dplyr::select(Day, Time, station, pred_on, pred_off) %>% 
+    rename(day = Day, time = Time) %>% 
+    mutate(pred_on = ifelse(pred_on < 0, 0, pred_on),
+           pred_off = ifelse(pred_off < 0, 0, pred_off))
+  result_path_sum <- result_sum %>% 
+    filter(from %in% line_c, to %in% line_c) %>% 
+    mutate(day = day_choose) %>% 
+    dplyr::select(day, time, from, to, count) %>% 
+    filter(from != to)
+  list(on_off = result_onoff, path = result_path_sum)
+}
+
+predict_demand_line(day_choose="Mon", time_choose="7", line_choose="G", type="mean")
+```
+
+앞단계에서의 예측값을 이용하여 우선 다음 2개의 데이터셋을 구축하였다.
+
+```{r, eval=FALSE}
+day_choose_list <- c("Sun", "Mon", "Tue", "Wed","Thr", "Fri", "Sat")
+time_choose_list <- c(0, 6:23)
+type_choose <- c("lower", "mean", "upper")
+
+predict_week <- list()
+route_total <- list()
+for(i in seq_along(day_choose_list)){
+  for(j in seq_along(time_choose_list)){
+    for(k in seq_along(type_choose)){
+      predict_week[[paste0(day_choose_list[i], "-", time_choose_list[j],
+                           "-", type_choose[k])]] <- 
+        predict_demand_line(day_choose=day_choose_list[i],
+                            time_choose=time_choose_list[j],
+                            line_choose="G", type =type_choose[k]) 
+      
+      route_total[[paste0(day_choose_list[i], "-", time_choose_list[j],
+                          "-", type_choose[k])]] <-
+        route_tot(day_choose=day_choose_list[i],
+                  time_choose=time_choose_list[j], type = type_choose[k]) %>% nrow()
+    }
+  }
+}
+
+### 이동경로 자료 
+i <- j <- 1; type = "mean"
+route_choose <- as.data.table(subway_04_route_daymean)
+setkey(route_choose, day)
+route_choose_frist <- route_choose[day==day_choose_list[i],]
+setkey(route_choose_frist, time)
+route_choose_frist$time <- as.numeric(route_choose_frist$time)
+route_choose_second <- route_choose_frist[time== time_choose_list[j],]
+route_choose_second %>% head() %>% kable("latex")
+
+## 최종 이동경로 자료
+route_tot(day_choose="Sun", time_choose="7", type="mean") %>%
+  filter(ride_on != ride_off, ride_on=="국민대") %>% head() %>% kable("latex")
+
+lower_list <- str_which(names(predict_week), pattern="lower")
+mean_list <- str_which(names(predict_week), pattern="mean")
+upper_list <- str_which(names(predict_week), pattern="upper")
+predict_week_onoff_lower <- predict_week[[lower_list[1]]]$on_off
+predict_week_path_lower <- predict_week[[lower_list[1]]]$path
+predict_week_onoff_mean <- predict_week[[mean_list[1]]]$on_off
+predict_week_path_mean <- predict_week[[mean_list[1]]]$path
+predict_week_onoff_upper <- predict_week[[upper_list[1]]]$on_off
+predict_week_path_upper <- predict_week[[upper_list[1]]]$path
+for(i in 2:length(lower_list)){
+  predict_week_onoff_lower <- rbind(predict_week_onoff_lower,
+                                    predict_week[[lower_list[i]]]$on_off) %>% na.omit()
+  predict_week_path_lower <- rbind(predict_week_path_lower, 
+                                   predict_week[[lower_list[i]]]$path) %>% na.omit()
+  predict_week_onoff_mean <- rbind(predict_week_onoff_mean, 
+                                   predict_week[[mean_list[i]]]$on_off) %>% na.omit()
+  predict_week_path_mean <- rbind(predict_week_path_mean, 
+                                  predict_week[[mean_list[i]]]$path) %>% na.omit()
+  predict_week_onoff_upper <- rbind(predict_week_onoff_upper, 
+                                    predict_week[[upper_list[i]]]$on_off) %>% na.omit()
+  predict_week_path_upper <- rbind(predict_week_path_upper, 
+                                   predict_week[[upper_list[i]]]$path) %>% na.omit()
+}
+
+
+#save(file="../data/predict_week_pi.RData", predict_week_onoff_lower, predict_week_path_lower,      predict_week_onoff_mean, predict_week_path_mean, predict_week_onoff_upper, predict_week_path_upper)
+```
+
+```{r}
+load(file="../data/predict_week_pi.RData")
+```
+
+predict_week_onoff : Sun 00시부터 Sat 23시까지 랜덤포레스트알고리즘을 이용한 강북횡단선 내 지하철역 승하차 예측값
+
+predict_week_path : Sun 00시부터 Sat 23시까지의 데이터 기반 강북횡단선 내 구간 이동 경로 카운트(평균)
+
+
+### 6. 결과비교
+
+#### 6.1.1 요일별 구간 수요 예측 결과 
+
+우선 구간별 계산된 결과는 역별 승/하차 결과값 또한 반영된 결과이므로 이를 고려하여 다음과 같이 1일 노선 수요을 계산한다.
+
+1. 요일별 강북횡단선 내 지하철 역 예상 승하차 이용객수 합
+
+```{r out.width="75%", fig.align="center"}
+### 요일/시간대별 구간 수요 예시 테이블
+predict_week_path_mean %>% filter(day=="Sun", time == "7")
+
+
+
+onoff_daily_gather_mean <- predict_week_onoff_mean %>% 
+  mutate(day = factor(day, levels=c("Sun","Mon","Tue","Wed","Thr","Fri","Sat"))) %>% 
+  group_by(day, station) %>% 
+  mutate(pred_on = ifelse(pred_on <0, 0, pred_on),
+         pred_off = ifelse(pred_off <0, 0, pred_off)) %>% 
+  summarise(on_daily = sum(pred_on), 
+            off_daily = sum(pred_off))  %>% 
+  gather(key='on_off', value = 'count', on_daily,off_daily) %>% 
+  mutate(type = "mean")
+
+onoff_daily_gather_lower <- predict_week_onoff_lower %>% 
+  mutate(day = factor(day, levels=c("Sun","Mon","Tue","Wed","Thr","Fri","Sat"))) %>% 
+  group_by(day, station) %>% 
+  mutate(pred_on = ifelse(pred_on <0, 0, pred_on),
+         pred_off = ifelse(pred_off <0, 0, pred_off)) %>% 
+  summarise(on_daily = sum(pred_on), 
+            off_daily = sum(pred_off))  %>% 
+  gather(key='on_off', value = 'count', on_daily,off_daily) %>% 
+  mutate(type = "lower")
+
+onoff_daily_gather_upper <- predict_week_onoff_upper %>% 
+  mutate(day = factor(day, levels=c("Sun","Mon","Tue","Wed","Thr","Fri","Sat"))) %>% 
+  group_by(day, station) %>% 
+  mutate(pred_on = ifelse(pred_on <0, 0, pred_on),
+         pred_off = ifelse(pred_off <0, 0, pred_off)) %>% 
+  summarise(on_daily = sum(pred_on), 
+            off_daily = sum(pred_off))  %>% 
+  gather(key='on_off', value = 'count', on_daily,off_daily) %>% 
+  mutate(type = "upper")
+
+bind_rows(list(onoff_daily_gather_mean, onoff_daily_gather_lower,  onoff_daily_gather_upper)) %>%
+  mutate(구분 = ifelse(station %in% c("청량리","월곡", "길음","정릉","홍제",
+                                    "디지털미디어시티","등촌","목동"),
+                     "기존", "신설")) %>% 
+  filter(구분=="신설", type=="mean") %>% ungroup %>% 
+  mutate(승하차 = ifelse(on_off=="on_daily", "승차", "하차")) %>% 
+  mutate(day = factor(day, labels=c("일", "월","화", "수", "목", "금", "토")),
+         type = factor(type, levels=c("mean", "lower", "upper"), 
+                       labels=c("예측값", "하한", "상한"))) %>% 
+  ggplot(aes(x=day, y= count))+#, fill=type, group=type)) + 
+  #geom_line() +
+  geom_bar(position="dodge", stat="identity") +#, col="white", fill="black") +
+  coord_cartesian(ylim=c(0, 12000)) + 
+  facet_grid(승하차~station, space="free") +
+  ylab("평균 이용객 수") + xlab("요일") + labs(fill="구분") + 
+  theme(strip.text = element_text(size=4), axis.title=element_text(size=7),
+        axis.text = element_text(size=4), legend.title = element_text(size=4),
+        legend.text = element_text(size=4), legend.key.size = unit(0.2, "cm"),
+        legend.position = "bottom") + 
+  scale_fill_viridis_d() + scale_color_viridis_d()
+#ggsave(filename="on_off_lineG_log.pdf", path="D:/workspace/seoulsubway_G/line_G/figure")
+
+```
+
+길음, 종암사거리, 목동 순으로 역별 승하차 이용객수가 많게 예측되었다. 이는 역 주위정보가 반영된 결과이다.
+
+#### 6.1.2 시간대별 역/요일/승/하차별 승하차 수요예측 결과
+
+```{r out.width="75%", fig.align="center"}
+onoff_mean <- predict_week_onoff_mean %>% 
+  mutate(day=factor(day, levels=c("Sun","Mon","Tue","Wed","Thr","Fri","Sat"))) %>% 
+  gather(on_off, count, pred_on, pred_off) %>% 
+  mutate(type="mean")
+
+onoff_lower <- predict_week_onoff_lower %>% 
+  mutate(day=factor(day, levels=c("Sun","Mon","Tue","Wed","Thr","Fri","Sat"))) %>% 
+  gather(on_off, count, pred_on, pred_off) %>% 
+  mutate(type="lower")
+
+onoff_upper <- predict_week_onoff_upper %>% 
+  mutate(day=factor(day, levels=c("Sun","Mon","Tue","Wed","Thr","Fri","Sat"))) %>% 
+  gather(on_off, count, pred_on, pred_off) %>% 
+  mutate(type="upper")
+
+predict_week_onoff_gather <- bind_rows(list(onoff_mean, onoff_lower,  onoff_upper))
+
+```
+
+```{r}
+predict_week_onoff_gather %>% 
+  mutate(count = ifelse(count <0, 0, count)) %>% 
+  mutate(구분 = ifelse(station %in% c("청량리","월곡", "길음","정릉","홍제",
+                                    "디지털미디어시티","등촌","목동"),
+                     "기존", "신설")) %>% 
+  filter(구분=="신설") %>% ungroup %>% 
+  mutate(day = factor(day, labels=c("일", "월","화", "수", "목", "금", "토")),
+         on_off = ifelse(on_off == "pred_on", "승차", "하차"),
+         type = factor(type, levels=c("mean", "lower", "upper"),
+                       labels=c("예측값", "하한", "상한"))) %>% 
+  filter(on_off == "승차", ! day %in% c("토", "일")) %>% 
+  group_by(time, station, type) %>% summarise(count = mean(count)) %>% 
+  ggplot(aes(x=time, y= count)) + 
+  geom_line(aes(color = type)) + facet_grid(~station) +
+  coord_cartesian(ylim=c(0, 3000)) +  theme_bw()  +
+  ylab("평균 이용객 수") + xlab("승차 시간") + labs(col="구분") +
+  theme(strip.text = element_text(size=4), axis.title=element_text(size=7),
+        axis.text = element_text(size=5), legend.title = element_text(size=7),
+        legend.text = element_text(size=7),
+        legend.position = "bottom") + scale_fill_viridis_c() +
+  scale_color_viridis_d() 
+# ggsave(filename="on_time_lineG_log.pdf", path="D:/workspace/seoulsubway_G/line_G/figure")
+
+predict_week_onoff_gather %>% 
+  mutate(count = ifelse(count <0, 0, count)) %>% 
+  mutate(구분 = ifelse(station %in% c("청량리","월곡", "길음","정릉","홍제",
+                                    "디지털미디어시티","등촌","목동"),
+                     "기존", "신설")) %>% 
+  filter(구분=="신설") %>% ungroup %>% 
+  mutate(day = factor(day, labels=c("일", "월","화", "수", "목", "금", "토")),
+         on_off = ifelse(on_off == "pred_on", "승차", "하차"),
+         type = factor(type, levels=c("mean", "lower", "upper"),
+                       labels=c("예측값", "하한", "상한"))) %>% 
+  filter(on_off == "하차", ! day %in% c("토", "일")) %>% 
+  group_by(time, station, type) %>% summarise(count = mean(count)) %>% 
+  ggplot(aes(x=time, y= count)) + geom_line(aes(color = type)) + facet_grid(~station) + 
+  coord_cartesian(ylim=c(0, 3000)) +  theme_bw()  +
+  ylab("평균 이용객 수") + xlab("하차 시간") + labs(col="구분") +
+  theme(strip.text = element_text(size=4), axis.title=element_text(size=7),
+        axis.text = element_text(size=5), legend.title = element_text(size=7),
+        legend.text = element_text(size=7),
+        legend.position = "bottom") + scale_fill_viridis_c() +
+  scale_color_viridis_d() 
+#ggsave(filename="off_time_lineG_log.pdf", path="D:/workspace/seoulsubway_G/line_G/figure")
+
+#ggsave(filename="on_off_time_lineG.pdf", path="D:/workspace/seoulsubway_G/line_G/figure")
+```
+
+#### 6.1.3 요일별 강북횡단선 내 지하철역 승/하차 인원 예측값
+
+승차인원과 하차인원의 합을 통하여 강북횡단선을 이용하여 승/하차 하는 인원은 약 30만명이 될 것으로 보인다.
+```{r, fig.align='center'}
+onoff_lineG_lower <- predict_week_onoff_lower %>% 
+  filter(! station %in% c("청량리", "월곡", "길음", "정릉",
+                   "디지털미디어시티", "홍제", "등촌", "목동")) %>% 
+  mutate(day = factor(day, levels=c("Sun","Mon","Tue","Wed","Thr","Fri","Sat"),
+                      labels=c("일", "월","화", "수", "목", "금", "토"))) %>% 
+  mutate(pred_on = ifelse(pred_on <0, 0, pred_on),
+         pred_off = ifelse(pred_off <0, 0, pred_off)) %>% 
+  group_by(day) %>% 
+  summarise(ride_on = sum(pred_on),
+            ride_off = sum(pred_off)) 
+
+########### 신설예정역 승하차 / 하한
+onoff_lineG_lower %>% kable("latex")
+
+onoff_lineG_upper <- predict_week_onoff_upper %>% 
+  filter(! station %in% c("청량리", "월곡", "길음", "정릉",
+                   "디지털미디어시티", "홍제", "등촌", "목동")) %>% 
+  mutate(day = factor(day, levels=c("Sun","Mon","Tue","Wed","Thr","Fri","Sat"),
+                      labels=c("일", "월","화", "수", "목", "금", "토"))) %>% 
+  mutate(pred_on = ifelse(pred_on <0, 0, pred_on),
+         pred_off = ifelse(pred_off <0, 0, pred_off)) %>% 
+  group_by(day) %>% 
+  summarise(ride_on = sum(pred_on),
+            ride_off = sum(pred_off)) 
+
+########### 신설예정역 승하차 / 상한
+onoff_lineG_upper %>% kable("latex")
+
+
+onoff_lineG_mean <- predict_week_onoff_mean %>% 
+  filter(! station %in% c("청량리", "월곡", "길음", "정릉",
+                   "디지털미디어시티", "홍제", "등촌", "목동")) %>% 
+  mutate(day = factor(day, levels=c("Sun","Mon","Tue","Wed","Thr","Fri","Sat"),
+                      labels=c("일", "월","화", "수", "목", "금", "토"))) %>% 
+  mutate(pred_on = ifelse(pred_on <0, 0, pred_on),
+         pred_off = ifelse(pred_off <0, 0, pred_off)) %>% 
+  group_by(day) %>% 
+  summarise(ride_on = sum(pred_on),
+            ride_off = sum(pred_off)) 
+
+########### 신설예정역 승하차 / 평균
+onoff_lineG_mean %>% kable("latex")
+
+```
+
+#### 6.1.4 역 사이 구간 수요
+
+* 이는 없는 노선이 생겼다는 가정하에서 나온 결과값으로 1-8호선 내 실제 지하철 이용객들의 이동경로를 최단경로 자료구조를 통하여 알아본 후 계산한 결과이다.
+
+```{r out.width="80%", fig.align='center'}
+#predict_week_path %>% head() %>% kable("latex")
+
+predict_week_path %>% 
+  mutate(section = paste0(from, "-", to),
+         day = factor(day, levels=c("Sun","Mon","Tue","Wed","Thr","Fri","Sat"))) %>% 
+  filter(from!=to) %>% 
+  group_by(day, section) %>% 
+  summarise(total = sum(count)) %>% 
+  group_by(day) %>% summarise(mean_tot = mean(total)) %>% 
+  kable("latex")
+
+# 수요예측
+get_linedemand <- function(input_data){
+pred_sec_count <- input_data %>% 
+  mutate(from = factor(from, levels=c("청량리", "홍릉", "월곡", "종암사거리", "길음", "정릉", 
+                                        "국민대", "평창동", "상명대입구", "홍제", "서대문구청", 
+                                        "명지대", "남가좌", "디지털미디어시티", "상암", "등촌",
+                                        "신등촌", "목동사거리", "목동")),
+           to = factor(to, levels=c("청량리", "홍릉", "월곡", "종암사거리", "길음", "정릉", 
+                                    "국민대", "평창동", "상명대입구", "홍제", "서대문구청", 
+                                    "명지대", "남가좌", "디지털미디어시티", "상암", "등촌",
+                                    "신등촌", "목동사거리", "목동")),
+           from_rank = as.numeric(from), to_rank = as.numeric(to)) %>% 
+  mutate(type= ifelse(from_rank > to_rank, "상행", "하행")) %>% 
+  mutate(section = paste0(from, "-", to),
+         day = factor(day, levels=c("Sun","Mon","Tue","Wed","Thr","Fri","Sat"),
+                      labels = c("일", "월", "화", "수", "목", "금", "토")),
+         from_lev = as.numeric(from), to_lev = as.numeric(to)) %>% 
+  filter(from!=to) %>% 
+  group_by(day, type, section) %>% 
+  summarise(total = sum(count))
+
+inner_G <- pred_sec_count_mean$section %>% unique()
+unner_G_db <- shortestpath_db_G %>% mutate(section=paste0(from, "-", to)) %>% 
+  filter(section %in% inner_G)
+
+on_route_G <- unner_G_db %>% separate(set, c("st", "end"), remove=FALSE) %>% 
+  filter(st %in% c("청량리", "월곡", "길음", "정릉",
+                   "디지털미디어시티", "홍제", "등촌", "목동")) 
+
+off_route_G <- unner_G_db %>% separate(set, c("st", "end"), remove=FALSE) %>% 
+  filter(end %in% c("청량리", "월곡", "길음", "정릉",
+                   "디지털미디어시티", "홍제", "등촌", "목동")) 
+
+########### 환승역들 승하차 인원수 
+route_choose <- as.data.table(subway_04_route_daymean)
+route_choose_sum <- route_choose %>% 
+  mutate(set = paste0(ride_on, "-", ride_off)) %>% 
+  group_by(day, set) %>% summarise(sum_count = sum(count)) %>% 
+  as.data.table()
+setkey(route_choose_sum, set)
+transfer_lineG <- route_choose_sum[set %in% unique(on_route_G$set), ] %>% group_by(day) %>% 
+  summarise(on_count = sum(sum_count)) %>% cbind(
+route_choose_sum[set %in% unique(off_route_G$set), ] %>% group_by(day) %>% 
+  summarise(off_count = sum(sum_count)) %>% 
+  ungroup %>% dplyr::select(-day)
+) %>% as_tibble()
+transfer_lineG$day <- c("금", "목", "수", "월", "일", "토", "화")
+
+return(transfer_lineG)
+}
+
+tot_onoff_lower <- get_linedemand(predict_week_path_lower) %>% 
+  merge(onoff_lineG_lower) %>%
+  mutate(on = on_count + ride_on,
+         off = off_count + ride_off,
+         tot = on + off,
+         day = factor(day, levels=c("일","월","화","수","목","금","토"))) %>%
+  arrange(day)
+
+tot_onoff_mean <- get_linedemand(predict_week_path_mean) %>% 
+  merge(onoff_lineG_mean) %>%
+  mutate(on = on_count + ride_on,
+         off = off_count + ride_off,
+         tot = on + off,
+         day = factor(day, levels=c("일","월","화","수","목","금","토"))) %>%
+  arrange(day)
+
+tot_onoff_upper <- get_linedemand(predict_week_path_upper) %>% 
+  merge(onoff_lineG_upper) %>%
+  mutate(on = on_count + ride_on,
+         off = off_count + ride_off,
+         tot = on + off,
+         day = factor(day, levels=c("일","월","화","수","목","금","토"))) %>%
+  arrange(day)
+
+inner_outer_G <- unner_G_db %>% separate(set, c("st", "end"), remove=FALSE) %>% 
+  filter(! st %in% line_G$Name, ! end %in% line_G$Name)
+### 1604개의 환승경로로 이동하는 경우 
+inner_outer_G$set %>% unique %>% length()
+
+summarise_count_G <- function(day_choose, time_choose, type){
+  route_choose <- as.data.table(subway_04_route_daymean)
+  setkey(route_choose, day)
+  route_choose_frist <- route_choose[day==day_choose,]
+  setkey(route_choose_frist, time)
+  route_choose_second <- route_choose_frist[time==time_choose,]
+  route_choose_second <- route_choose_second %>% 
+    mutate(set = paste0(ride_on, "-", ride_off)) %>% as_tibble()
+  on_case <- predict_interval_gbm(day_choose = day_choose, 
+                               time_choose = time_choose, 
+                               on_off_choose = "on") %>% 
+    MC_sampling(on_off_choose =  "on", type) %>% 
+    dplyr::select(day, depart, arrival, time, count) %>%
+    mutate(set = paste0(depart, "-", arrival)) %>% 
+    rename(ride_on = depart, ride_off = arrival)
+  off_case <- predict_interval_gbm(day_choose = day_choose, 
+                                time_choose = time_choose, 
+                                on_off_choose = "off") %>%
+    MC_sampling( on_off_choose =  "off") %>% 
+    dplyr::select(day, depart, arrival, time, count) %>% 
+    mutate(set = paste0(depart, "-", arrival)) %>% 
+    rename(ride_on = depart, ride_off = arrival)
+  unit <- route_choose_second %>% rbind(on_case, off_case) %>% 
+    as.data.table()
+  setkey(unit, set)
+  unit[set %in% unique(inner_outer_G$set)] %>% 
+    group_by(day, set) %>% summarise(sum_count = sum(count))
+}
+
+day_choose_list <- c("Sun", "Mon", "Tue", "Wed","Thr", "Fri", "Sat")
+time_choose_list <- c(0, 6:23)
+type_choose
+tot_day_list_sec <- list()
+for(i in seq_along(day_choose_list)){
+  for(j in 1:length(time_choose_list)){
+    for(k in 1:length(type_choose)){
+      tot_day_list_sec[[paste0(day_choose_list[i], "-", time_choose_list[j],
+                           "-", type_choose[k])]] <-
+        summarise_count_G(day_choose=day_choose_list[i], 
+                          time_choose = time_choose_list[j],
+                          type = type_choose[k]) %>%
+        summarise(tot_sum = sum(sum_count))
+    }
+  }
+}
+
+
+#sapply(1:398, function(x){tot_day_list_sec[[x]]$day})
+tot_day_list_sec[[1]]$day <- "Sun"
+tot_day_list_sec[[2]]$day <- "Sun"
+daily_tot <- data.frame(matrix(0, 19, 7))
+colnames(daily_tot) <- c("일", "월", "화", "수","목", "금", "토")
+daily_tot_lower <- daily_tot_mean <- daily_tot_upper <- daily_tot
+
+for(k in 1:19){
+  daily_tot_lower[k,1] <- tot_day_list_sec[[k]]$tot_sum
+  daily_tot_lower[k,2] <- tot_day_list_sec[[(k+57)]]$tot_sum
+  daily_tot_lower[k,3] <- tot_day_list_sec[[(k+114)]]$tot_sum
+  daily_tot_lower[k,4] <- tot_day_list_sec[[(k+171)]]$tot_sum
+  daily_tot_lower[k,5] <- tot_day_list_sec[[(k+228)]]$tot_sum
+  daily_tot_lower[k,6] <- tot_day_list_sec[[(k+285)]]$tot_sum
+  daily_tot_lower[k,7] <- tot_day_list_sec[[(k+342)]]$tot_sum
+  daily_tot_mean[k,1] <- tot_day_list_sec[[k+1]]$tot_sum
+  daily_tot_mean[k,2] <- tot_day_list_sec[[(k+57+1)]]$tot_sum
+  daily_tot_mean[k,3] <- tot_day_list_sec[[(k+114+1)]]$tot_sum
+  daily_tot_mean[k,4] <- tot_day_list_sec[[(k+171+1)]]$tot_sum
+  daily_tot_mean[k,5] <- tot_day_list_sec[[(k+228+1)]]$tot_sum
+  daily_tot_mean[k,6] <- tot_day_list_sec[[(k+285+1)]]$tot_sum
+  daily_tot_mean[k,7] <- tot_day_list_sec[[(k+342+1)]]$tot_sum
+  daily_tot_upper[k,1] <- tot_day_list_sec[[k+2]]$tot_sum
+  daily_tot_upper[k,2] <- tot_day_list_sec[[(k+57+2)]]$tot_sum
+  daily_tot_upper[k,3] <- tot_day_list_sec[[(k+114+2)]]$tot_sum
+  daily_tot_upper[k,4] <- tot_day_list_sec[[(k+171+2)]]$tot_sum
+  daily_tot_upper[k,5] <- tot_day_list_sec[[(k+228+2)]]$tot_sum
+  daily_tot_upper[k,6] <- tot_day_list_sec[[(k+285+2)]]$tot_sum
+  daily_tot_upper[k,7] <- tot_day_list_sec[[(k+342+2)]]$tot_sum
+}
+
+inner_result_lower <- daily_tot_lower %>% mutate_all(as.numeric) %>% colSums()
+inner_result_mean <- daily_tot_mean %>% mutate_all(as.numeric) %>% colSums()
+inner_result_upper <- daily_tot_upper %>% mutate_all(as.numeric) %>% colSums()
+
+data.frame(day = daily_tot %>% names(), inner_count = inner_result_lower) %>% 
+  left_join(tot_onoff_lower) %>% mutate(final = tot + inner_count)
+
+data.frame(day = daily_tot %>% names(), inner_count = inner_result_mean) %>% 
+  left_join(tot_onoff_mean) %>% mutate(final = tot + inner_count)
+
+data.frame(day = daily_tot %>% names(), inner_count = inner_result_upper) %>% 
+  left_join(tot_onoff_upper) %>% mutate(final = tot + inner_count)
+
+```
+
+```{r out.width="80%", fig.align='center'}
+predict_week_path_longlat_mean <- subway_data_G[["G"]][,c("Name", "long", "lat")] %>% 
+  rename(from = Name) %>% 
+  right_join(predict_week_path_mean) %>% 
+  rename(from_long = long, from_lat = lat,
+         Name = to) %>%
+  left_join(subway_data_G[["G"]][,c("Name", "long", "lat")]) %>% 
+  rename(to = Name, to_long = long, to_lat = lat) 
+predict_week_path_longlat_mean <- predict_week_path_longlat_mean %>% 
+    mutate(from = factor(from, levels=c("청량리", "홍릉", "월곡", "종암사거리", "길음", "정릉", 
+                                        "국민대", "평창동", "상명대입구", "홍제", "서대문구청", 
+                                        "명지대", "남가좌", "디지털미디어시티", "상암", "등촌",
+                                        "신등촌", "목동사거리", "목동")),
+           to = factor(to, levels=c("청량리", "홍릉", "월곡", "종암사거리", "길음", "정릉", 
+                                    "국민대", "평창동", "상명대입구", "홍제", "서대문구청", 
+                                    "명지대", "남가좌", "디지털미디어시티", "상암", "등촌",
+                                    "신등촌", "목동사거리", "목동")),
+           from_rank = as.numeric(from), to_rank = as.numeric(to))
+
+predict_week_path_longlat_lower <- subway_data_G[["G"]][,c("Name", "long", "lat")] %>% 
+  rename(from = Name) %>% 
+  right_join(predict_week_path_lower) %>% 
+  rename(from_long = long, from_lat = lat,
+         Name = to) %>%
+  left_join(subway_data_G[["G"]][,c("Name", "long", "lat")]) %>% 
+  rename(to = Name, to_long = long, to_lat = lat) 
+predict_week_path_longlat_lower <- predict_week_path_longlat_lower %>% 
+    mutate(from = factor(from, levels=c("청량리", "홍릉", "월곡", "종암사거리", "길음", "정릉", 
+                                        "국민대", "평창동", "상명대입구", "홍제", "서대문구청", 
+                                        "명지대", "남가좌", "디지털미디어시티", "상암", "등촌",
+                                        "신등촌", "목동사거리", "목동")),
+           to = factor(to, levels=c("청량리", "홍릉", "월곡", "종암사거리", "길음", "정릉", 
+                                    "국민대", "평창동", "상명대입구", "홍제", "서대문구청", 
+                                    "명지대", "남가좌", "디지털미디어시티", "상암", "등촌",
+                                    "신등촌", "목동사거리", "목동")),
+           from_rank = as.numeric(from), to_rank = as.numeric(to))
+
+predict_week_path_longlat_upper <- subway_data_G[["G"]][,c("Name", "long", "lat")] %>% 
+  rename(from = Name) %>% 
+  right_join(predict_week_path_upper) %>% 
+  rename(from_long = long, from_lat = lat,
+         Name = to) %>%
+  left_join(subway_data_G[["G"]][,c("Name", "long", "lat")]) %>% 
+  rename(to = Name, to_long = long, to_lat = lat) 
+predict_week_path_longlat_upper <- predict_week_path_longlat_upper %>% 
+    mutate(from = factor(from, levels=c("청량리", "홍릉", "월곡", "종암사거리", "길음", "정릉", 
+                                        "국민대", "평창동", "상명대입구", "홍제", "서대문구청", 
+                                        "명지대", "남가좌", "디지털미디어시티", "상암", "등촌",
+                                        "신등촌", "목동사거리", "목동")),
+           to = factor(to, levels=c("청량리", "홍릉", "월곡", "종암사거리", "길음", "정릉", 
+                                    "국민대", "평창동", "상명대입구", "홍제", "서대문구청", 
+                                    "명지대", "남가좌", "디지털미디어시티", "상암", "등촌",
+                                    "신등촌", "목동사거리", "목동")),
+           from_rank = as.numeric(from), to_rank = as.numeric(to))
+path_count_G <- function(time_choose, day_choose, on_off){
+  predict_week_path_longlat_key <- predict_week_path_longlat %>% 
+      filter(from_rank>to_rank)
+  if(on_off == "on"){
+    predict_week_path_longlat_key <- predict_week_path_longlat %>% 
+      filter(from_rank<to_rank)
+  }
+  from_set <- predict_week_path_longlat_key %>%
+    mutate(set = paste0(from, "-", to)) %>% 
+    filter(time==time_choose, day == day_choose) %>% 
+    dplyr::select(time, day, set, from, from_long, from_lat, count)
+  from_set$key <- "from"
+  to_set <- predict_week_path_longlat_key %>%
+    mutate(set = paste0(from, "-", to)) %>% 
+    filter(time==time_choose, day == day_choose) %>% 
+    dplyr::select(time, day, set, to, to_long, to_lat, count)
+  to_set$key <- "to"  
+  colnames(from_set) <- colnames(to_set) <- c("time", "day", "set", "station",
+                                              "long", "lat", "count", "key")
+  from_to_path_set <- rbind(from_set, to_set)
+  ggmap(get_map(location = c(126.9534, 37.58047), zoom = 12)) + 
+    geom_path(data=from_to_path_set, aes(x=long, y=lat, col=count, group=set), size=4) +
+    scale_color_gradient(low="yellow", high="red") +
+    ggtitle(paste("each count of section", "in", time_choose, day_choose, on_off))
+}
+
+```
+
+* 특정 요일/시간대 구간 카운트 시각화 예시
+
+```{r out.width="75%", fig.align="center", echo=FALSE}
+
+get_fromto_section <- function(input_data){
+predict_week_path_longlat_key <- input_data %>% 
+      mutate(type = ifelse(from_rank>to_rank, "상행", "하행"))
+from_set <- predict_week_path_longlat_key %>%
+  mutate(set = paste0(from, "-", to)) %>% 
+  dplyr::select(time, day, set, from, from_long, from_lat, count, type)
+from_set$key <- "from"
+to_set <- predict_week_path_longlat_key %>%
+  mutate(set = paste0(from, "-", to)) %>% 
+  dplyr::select(time, day, set, to, to_long, to_lat, count, type)
+to_set$key <- "to"  
+colnames(from_set) <- colnames(to_set) <- c("time", "day", "set", "station",
+                                            "long", "lat", "count", "type", "key")
+from_to_path_set <- rbind(from_set, to_set)
+
+from_to_path_set_select <- from_to_path_set %>% filter(time == "15", day=="Mon")
+from_to_path_set_select2 <- from_to_path_set %>% filter(time == "18", day=="Mon")
+
+from_to_path_set_tot <- rbind(from_to_path_set_select, from_to_path_set_select2) %>% 
+  mutate(time2 = paste0(time, "시"))
+from_to_path_set_tot
+}
+
+
+ggmap(get_map(location = c(126.95, 37.58), zoom = 12)) + 
+   geom_path(data=get_fromto_section(predict_week_path_longlat_mean), 
+             aes(x=long, y=lat, col=count, group=set), size=2) +
+  scale_x_continuous(breaks = c(126.8, 126.9, 127)) +
+  scale_y_continuous(breaks = c(37.5, 37.6)) + 
+  facet_grid(time2~type) +
+  labs(col="평균 이용객 수") + xlab("경도") + ylab("위도") +
+  scale_fill_viridis_c() + scale_color_viridis_c() +
+  theme(strip.text = element_text(size=7), axis.title=element_text(size=7),
+        axis.text = element_text(size=7), legend.title = element_text(size=7),
+        legend.text = element_text(size=7), legend.key.size = unit(0.5, "cm"),
+        axis.text.x = element_text(angle = 90)) + theme_bw()
+#ggsave(filename="section_demand_log.pdf", path="D:/workspace/seoulsubway_G/line_G/figure")
+```
+
+```{r}
+predict_week_path_longlat_upper %>% 
+  mutate(type = ifelse(from_rank>to_rank, "상행", "하행")) %>% 
+  filter(type == "상행") %>% 
+  mutate(day = factor(day, levels=c("Sun","Mon","Tue","Wed","Thr","Fri","Sat"),
+                      labels=c("일", "월","화", "수", "목", "금", "토"))) %>% 
+  mutate(구간 = paste0(from, "-", to),
+         time = as.numeric(time)) %>% 
+  ggplot(aes(x=time, y=count, col=구간, group=구간)) +
+  geom_line() + facet_grid(~day) + theme_bw() + 
+  ylab("이용객 수") + xlab("시간") +
+  theme(strip.text = element_text(size=5), axis.title=element_text(size=7),
+        axis.text = element_text(size=5), legend.title = element_text(size=4),
+        legend.text = element_text(size=5), legend.key.size = unit(0.5, "cm"),
+        legend.position = "bottom") + 
+  scale_fill_viridis_c() + scale_color_viridis_d()
+#ggsave(filename="up_section_log.pdf", path="D:/workspace/seoulsubway_G/line_G/figure")
+#ggsave(filename="up_section_log_upper.pdf", path="D:/workspace/seoulsubway_G/line_G/figure")
+#ggsave(filename="up_section_log_lower.pdf", path="D:/workspace/seoulsubway_G/line_G/figure")
+
+predict_week_path_longlat_upper %>% 
+  mutate(type = ifelse(from_rank>to_rank, "상행", "하행")) %>% 
+  filter(type == "하행") %>% 
+  mutate(day = factor(day, levels=c("Sun","Mon","Tue","Wed","Thr","Fri","Sat"),
+                      labels=c("일", "월","화", "수", "목", "금", "토"))) %>% 
+  mutate(구간 = paste0(from, "-", to),
+         time = as.numeric(time)) %>% 
+  ggplot(aes(x=time, y=count, col=구간, group=구간)) +
+  geom_line() + facet_grid(~day) + theme_bw() + 
+  ylab("이용객 수") + xlab("시간") +
+  theme(strip.text = element_text(size=5), axis.title=element_text(size=7),
+        axis.text = element_text(size=5), legend.title = element_text(size=4),
+        legend.text = element_text(size=5), legend.key.size = unit(0.2, "cm"),
+        legend.position = "bottom") + 
+  scale_fill_viridis_c() + scale_color_viridis_d()
+#ggsave(filename="down_section_log.pdf", path="D:/workspace/seoulsubway_G/line_G/figure")
+#ggsave(filename="down_section_log_lower.pdf", path="D:/workspace/seoulsubway_G/line_G/figure")
+#ggsave(filename="down_section_log_upper.pdf", path="D:/workspace/seoulsubway_G/line_G/figure")
+
 ```
 
 
